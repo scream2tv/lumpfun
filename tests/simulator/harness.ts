@@ -128,10 +128,30 @@ export interface SellArgs {
   referral: Uint8Array;
 }
 
+export interface TransferArgs {
+  fromAddr: Uint8Array;
+  toAddr: Uint8Array;
+  amount: bigint;
+}
+
+export interface WithdrawReferralArgs {
+  ref: Uint8Array;
+}
+
 export interface SimulatorHandle {
   buy(args: BuyArgs): void;
   sell(args: SellArgs): void;
+  transfer(args: TransferArgs): void;
+  withdrawPlatform(): void;
+  withdrawCreator(): void;
+  withdrawReferral(args: WithdrawReferralArgs): void;
   getLedger(): LedgerView;
+}
+
+// Free-function accessor so tests can write `getLedger(h)` instead of
+// `h.getLedger()` when that's easier to read.
+export function getLedger(h: SimulatorHandle): LedgerView {
+  return h.getLedger();
 }
 
 function bytes32(fill: number): Uint8Array {
@@ -255,6 +275,32 @@ export async function deployInSimulator(
         remainder,
         hasReferral,
         referral,
+      );
+      context = nextCtx;
+    },
+    transfer(args: TransferArgs) {
+      const { fromAddr, toAddr, amount } = args;
+      const { context: nextCtx } = contract.circuits.transfer!(
+        context,
+        fromAddr,
+        toAddr,
+        amount,
+      );
+      context = nextCtx;
+    },
+    withdrawPlatform() {
+      const { context: nextCtx } = contract.circuits.withdraw_platform!(context);
+      context = nextCtx;
+    },
+    withdrawCreator() {
+      const { context: nextCtx } = contract.circuits.withdraw_creator!(context);
+      context = nextCtx;
+    },
+    withdrawReferral(args: WithdrawReferralArgs) {
+      const { ref } = args;
+      const { context: nextCtx } = contract.circuits.withdraw_referral!(
+        context,
+        ref,
       );
       context = nextCtx;
     },

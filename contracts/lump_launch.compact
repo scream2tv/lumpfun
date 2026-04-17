@@ -357,3 +357,76 @@ export circuit sell(
   const net_out_f: Field = curve_payout_f - fee_f;
   sendUnshielded(nativeToken(), net_out_f as Uint<128>, seller_recipient);
 }
+
+// ERC-20-style internal transfer. No fee, no NIGHT movement — just reshuffles
+// `balances`. Returns Boolean for parity with the standard ERC-20 `transfer`
+// interface (callers may ignore it).
+export circuit transfer(
+  from_addr: Bytes<32>,
+  to_addr:   Bytes<32>,
+  amount:    Uint<128>,
+): Boolean {
+  const from_u: Bytes<32> = disclose(from_addr);
+  const to_u:   Bytes<32> = disclose(to_addr);
+  const amt_u:  Uint<128> = disclose(amount);
+
+  // (1) Amount > 0.
+  assert(amt_u > 0, "zero amount");
+
+  // (2) Sender has an entry. lookup() throws on miss, so member-guard first.
+  assert(balances.member(from_u), "sender has no balance");
+
+  // (3) Sender has enough.
+  const from_prev: Uint<128> = balances.lookup(from_u);
+  assert(from_prev >= amt_u, "insufficient balance");
+
+  // (4) Debit sender.
+  balances.insert(from_u, ((from_prev as Field) - (amt_u as Field)) as Uint<128>);
+
+  // (5) Credit recipient (start from 0 on miss).
+  if (balances.member(to_u)) {
+    const to_prev: Uint<128> = balances.lookup(to_u);
+    balances.insert(to_u, ((to_prev as Field) + (amt_u as Field)) as Uint<128>);
+  } else {
+    balances.insert(to_u, amt_u);
+  }
+
+  return true;
+}
+
+// Sweep the platform's accrued NIGHT to `platform_recipient`. Anyone can call
+// this — the destination is pinned to the contract's immutable
+// `platform_recipient` so recipient-griefing is impossible.
+export circuit withdraw_platform(): [] {
+  assert(platform_accrued > 0, "nothing to withdraw");
+  const amt: Uint<128> = platform_accrued;
+  platform_accrued = 0;
+  const recipient: Either<ContractAddress, UserAddress> =
+    right<ContractAddress, UserAddress>(UserAddress { bytes: disclose(platform_recipient) });
+  sendUnshielded(nativeToken(), amt, recipient);
+}
+
+// Sweep the creator's accrued NIGHT to `creator_recipient`. Same open-call
+// rationale as `withdraw_platform`.
+export circuit withdraw_creator(): [] {
+  assert(creator_accrued > 0, "nothing to withdraw");
+  const amt: Uint<128> = creator_accrued;
+  creator_accrued = 0;
+  const recipient: Either<ContractAddress, UserAddress> =
+    right<ContractAddress, UserAddress>(UserAddress { bytes: disclose(creator_recipient) });
+  sendUnshielded(nativeToken(), amt, recipient);
+}
+
+// Sweep a referral's accrued NIGHT to the referral address itself. The
+// destination is the ref key — anyone can call, but the NIGHT only ever lands
+// at the referral pubkey that earned it.
+export circuit withdraw_referral(ref: Bytes<32>): [] {
+  const ref_u: Bytes<32> = disclose(ref);
+  assert(referrals_accrued.member(ref_u), "no accrual for ref");
+  const amt: Uint<128> = referrals_accrued.lookup(ref_u);
+  assert(amt > 0, "nothing to withdraw");
+  referrals_accrued.insert(ref_u, 0 as Uint<128>);
+  const recipient: Either<ContractAddress, UserAddress> =
+    right<ContractAddress, UserAddress>(UserAddress { bytes: ref_u });
+  sendUnshielded(nativeToken(), amt, recipient);
+}
