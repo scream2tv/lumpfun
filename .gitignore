@@ -5,3 +5,5 @@ dist/
 contracts/managed/
 .DS_Store
 *.log
+spikes/dr1_native_night/node_modules/
+~/.lumpfun/
