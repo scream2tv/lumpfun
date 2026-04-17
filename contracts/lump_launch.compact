@@ -238,3 +238,122 @@ export circuit buy(
     platform_accrued = ((platform_accrued as Field) + p_f + rem_f + r_f) as Uint<128>;
   }
 }
+
+// Sells `n_tokens` back to the bonding curve. Mirror of `buy` but reversed:
+// the seller burns tokens from their balance, the curve pays out NIGHT, and
+// the same fee split is applied to the curve-payout side. Like `buy`, the
+// quotes/fees/cuts are computed off-chain (src/curve.ts + src/fees.ts) and
+// the circuit verifies each via the same multiplication + comparison pattern.
+export circuit sell(
+  seller:       Bytes<32>,
+  n_tokens:     Uint<128>,
+  curve_payout: Uint<128>,
+  fee_total:    Uint<128>,
+  p_cut:        Uint<128>,
+  c_cut:        Uint<128>,
+  r_cut:        Uint<128>,
+  remainder:    Uint<128>,
+  has_referral: Boolean,
+  referral:     Bytes<32>,
+): [] {
+  const n_u: Uint<128> = disclose(n_tokens);
+  const curve_payout_u: Uint<128> = disclose(curve_payout);
+  const fee_total_u: Uint<128> = disclose(fee_total);
+  const p_cut_u: Uint<128> = disclose(p_cut);
+  const c_cut_u: Uint<128> = disclose(c_cut);
+  const r_cut_u: Uint<128> = disclose(r_cut);
+  const remainder_u: Uint<128> = disclose(remainder);
+  const has_referral_u: Boolean = disclose(has_referral);
+  const seller_u: Bytes<32> = disclose(seller);
+  const referral_u: Bytes<32> = disclose(referral);
+
+  // (1) Amount > 0.
+  assert(n_u > 0, "zero tokens");
+
+  // (2) Tokens available to burn (prevents negative from_after).
+  assert(tokens_sold >= n_u, "sell > tokens_sold");
+
+  // (3) Seller has balance >= n.
+  assert(balances.member(seller_u), "insufficient balance");
+  const prev_bal: Uint<128> = balances.lookup(seller_u);
+  assert(prev_bal >= n_u, "insufficient balance");
+
+  // (4) Curve payout identity (doubled, same rationale as curve_quote_sell):
+  //     2*curve_payout == 2*base*n + slope*(2*from_after*n + n*(n-1)),
+  //     where from_after = tokens_sold - n.
+  const n_f: Field = n_u as Field;
+  const base_f: Field = base_price_night as Field;
+  const slope_f: Field = slope_night as Field;
+  const from_after_u: Uint<128> = (tokens_sold - n_u) as Uint<128>;
+  const from_after_f: Field = from_after_u as Field;
+  const curve_payout_f: Field = curve_payout_u as Field;
+  const expected_2x: Field =
+    base_f * n_f * 2 + slope_f * (from_after_f * n_f * 2 + n_f * (n_f - 1));
+  assert(curve_payout_f + curve_payout_f == expected_2x, "bad curve_payout");
+
+  // (5) Fee floor: fee = floor(curve_payout * fee_bps / 10000).
+  //     fee*10000 <= curve_payout*fee_bps < (fee+1)*10000.
+  // Cast comparison operands to Uint<248> to avoid Uint<128> overflow
+  // (cp*fb can reach 2^128 * 2^16 = 2^144).
+  const fb_f: Field = fee_bps as Field;
+  const fee_f: Field = fee_total_u as Field;
+  const fee_p1_f: Field = fee_f + 1;
+  const cp_fb_f: Field = curve_payout_f * fb_f;
+  assert((fee_f * 10000) as Uint<248> <= cp_fb_f as Uint<248>, "fee_total too high");
+  assert((fee_p1_f * 10000) as Uint<248> > cp_fb_f as Uint<248>, "fee_total too low");
+
+  // (6) Platform cut floor: p_cut = floor(fee * platform_share_bps / 10000).
+  const p_bps_f: Field = platform_share_bps as Field;
+  const p_f: Field = p_cut_u as Field;
+  const p_p1_f: Field = p_f + 1;
+  const fp_f: Field = fee_f * p_bps_f;
+  assert((p_f * 10000) as Uint<248> <= fp_f as Uint<248>, "p_cut too high");
+  assert((p_p1_f * 10000) as Uint<248> > fp_f as Uint<248>, "p_cut too low");
+
+  // (7) Creator cut floor.
+  const c_bps_f: Field = creator_share_bps as Field;
+  const c_f: Field = c_cut_u as Field;
+  const c_p1_f: Field = c_f + 1;
+  const fc_f: Field = fee_f * c_bps_f;
+  assert((c_f * 10000) as Uint<248> <= fc_f as Uint<248>, "c_cut too high");
+  assert((c_p1_f * 10000) as Uint<248> > fc_f as Uint<248>, "c_cut too low");
+
+  // (8) Referral cut floor.
+  const r_bps_f: Field = referral_share_bps as Field;
+  const r_f: Field = r_cut_u as Field;
+  const r_p1_f: Field = r_f + 1;
+  const fr_f: Field = fee_f * r_bps_f;
+  assert((r_f * 10000) as Uint<248> <= fr_f as Uint<248>, "r_cut too high");
+  assert((r_p1_f * 10000) as Uint<248> > fr_f as Uint<248>, "r_cut too low");
+
+  // (9) Remainder identity: fee_total = p_cut + c_cut + r_cut + remainder.
+  const rem_f: Field = remainder_u as Field;
+  assert(fee_f == p_f + c_f + r_f + rem_f, "bad remainder");
+
+  // (10) State updates (after all verifications pass).
+  // balances[seller] -= n (safe: prev_bal >= n_u checked above).
+  balances.insert(seller_u, ((prev_bal as Field) - n_f) as Uint<128>);
+  tokens_sold   = from_after_u;
+  night_reserve = ((night_reserve as Field) - curve_payout_f) as Uint<128>;
+  creator_accrued = ((creator_accrued as Field) + c_f) as Uint<128>;
+
+  if (has_referral_u) {
+    // referrals_accrued[referral] += r_cut (start from 0 on miss).
+    const prev_ref: Uint<128> = referrals_accrued.member(referral_u)
+      ? referrals_accrued.lookup(referral_u)
+      : 0;
+    referrals_accrued.insert(referral_u, ((prev_ref as Field) + r_f) as Uint<128>);
+    platform_accrued = ((platform_accrued as Field) + p_f + rem_f) as Uint<128>;
+  } else {
+    // Absent-referral: r_cut routes to platform as well.
+    platform_accrued = ((platform_accrued as Field) + p_f + rem_f + r_f) as Uint<128>;
+  }
+
+  // (11) Pay the seller net of fee: curve_payout - fee_total.
+  // Construct Either<ContractAddress, UserAddress> right-branch from the raw
+  // seller pubkey (MVP: all balance holders are users, not contracts).
+  const seller_recipient: Either<ContractAddress, UserAddress> =
+    right<ContractAddress, UserAddress>(UserAddress { bytes: seller_u });
+  const net_out_f: Field = curve_payout_f - fee_f;
+  sendUnshielded(nativeToken(), net_out_f as Uint<128>, seller_recipient);
+}

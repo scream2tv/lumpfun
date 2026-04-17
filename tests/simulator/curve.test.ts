@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { deployInSimulator } from './harness.js';
-import { curveCostBuy } from '../../src/curve.js';
+import { curveCostBuy, curvePayoutSell } from '../../src/curve.js';
 
 // Helper: compute the raw (unrouted) fee cuts the contract expects as inputs.
 // computeFeeSplit() from src/fees.ts routes the remainder (and absent-referral
@@ -231,5 +231,248 @@ describe('LumpLaunch.buy', () => {
     expect(state.tokens_sold).toBe(sold);
     expect(state.night_reserve).toBe(cumulativeCurveCost);
     expect(state.balances.lookup(buyer)).toBe(sold);
+  });
+});
+
+describe('LumpLaunch.sell', () => {
+  it('sell after buy (zero-fee config): state exactly round-trips to zero residual', async () => {
+    const basePrice = 1000n;
+    const slope = 1n;
+    const h = await deployInSimulator({
+      basePrice,
+      slope,
+      maxSupply: 1_000_000n,
+      feeBps: 0,
+      pBps: 5000,
+      cBps: 4000,
+      rBps: 1000,
+    });
+    const trader = new Uint8Array(32).fill(9);
+    const referral = new Uint8Array(32);
+
+    // Buy 100 tokens at fee_bps=0.
+    const buyCost = curveCostBuy(0n, 100n, basePrice, slope);
+    h.buy({
+      buyer: trader,
+      nTokens: 100n,
+      curveCost: buyCost,
+      feeTotal: 0n,
+      pCut: 0n,
+      cCut: 0n,
+      rCut: 0n,
+      remainder: 0n,
+      hasReferral: false,
+      referral,
+    });
+
+    // Sell 100 tokens — should reverse exactly.
+    const payout = curvePayoutSell(100n, 100n, basePrice, slope);
+    h.sell({
+      seller: trader,
+      nTokens: 100n,
+      curvePayout: payout,
+      feeTotal: 0n,
+      pCut: 0n,
+      cCut: 0n,
+      rCut: 0n,
+      remainder: 0n,
+      hasReferral: false,
+      referral,
+    });
+
+    const state = h.getLedger();
+    expect(state.tokens_sold).toBe(0n);
+    expect(state.night_reserve).toBe(0n);
+    expect(state.balances.lookup(trader)).toBe(0n);
+    expect(payout).toBe(buyCost); // round-trip identity
+  });
+
+  it('partial sell: reserve equals integral to new tokens_sold', async () => {
+    const basePrice = 1000n;
+    const slope = 1n;
+    const h = await deployInSimulator({
+      basePrice,
+      slope,
+      maxSupply: 1_000_000n,
+      feeBps: 0,
+      pBps: 5000,
+      cBps: 4000,
+      rBps: 1000,
+    });
+    const trader = new Uint8Array(32).fill(9);
+    const referral = new Uint8Array(32);
+
+    const buyCost = curveCostBuy(0n, 100n, basePrice, slope);
+    h.buy({
+      buyer: trader,
+      nTokens: 100n,
+      curveCost: buyCost,
+      feeTotal: 0n,
+      pCut: 0n,
+      cCut: 0n,
+      rCut: 0n,
+      remainder: 0n,
+      hasReferral: false,
+      referral,
+    });
+
+    const payout = curvePayoutSell(100n, 40n, basePrice, slope);
+    h.sell({
+      seller: trader,
+      nTokens: 40n,
+      curvePayout: payout,
+      feeTotal: 0n,
+      pCut: 0n,
+      cCut: 0n,
+      rCut: 0n,
+      remainder: 0n,
+      hasReferral: false,
+      referral,
+    });
+
+    const state = h.getLedger();
+    expect(state.tokens_sold).toBe(60n);
+    expect(state.night_reserve).toBe(curveCostBuy(0n, 60n, basePrice, slope));
+    expect(state.balances.lookup(trader)).toBe(60n);
+  });
+
+  it('sell with fees: fee accrues on the curve-payout side exactly per TS mirror', async () => {
+    const basePrice = 1000n;
+    const slope = 1n;
+    const feeBps = 100;
+    const pBps = 5000;
+    const cBps = 4000;
+    const rBps = 1000;
+    const h = await deployInSimulator({
+      basePrice,
+      slope,
+      maxSupply: 1_000_000n,
+      feeBps,
+      pBps,
+      cBps,
+      rBps,
+    });
+    const trader = new Uint8Array(32).fill(9);
+    const referral = new Uint8Array(32);
+
+    // Buy 100 with fee.
+    const buyCost = curveCostBuy(0n, 100n, basePrice, slope);
+    const buyCuts = rawCuts(buyCost, feeBps, pBps, cBps, rBps);
+    h.buy({
+      buyer: trader,
+      nTokens: 100n,
+      curveCost: buyCost,
+      feeTotal: buyCuts.fee,
+      pCut: buyCuts.p,
+      cCut: buyCuts.c,
+      rCut: buyCuts.r,
+      remainder: buyCuts.remainder,
+      hasReferral: false,
+      referral,
+    });
+    const platformAfterBuy = h.getLedger().platform_accrued;
+    const creatorAfterBuy = h.getLedger().creator_accrued;
+
+    // Now sell 100.
+    const payout = curvePayoutSell(100n, 100n, basePrice, slope);
+    const sellCuts = rawCuts(payout, feeBps, pBps, cBps, rBps);
+    h.sell({
+      seller: trader,
+      nTokens: 100n,
+      curvePayout: payout,
+      feeTotal: sellCuts.fee,
+      pCut: sellCuts.p,
+      cCut: sellCuts.c,
+      rCut: sellCuts.r,
+      remainder: sellCuts.remainder,
+      hasReferral: false,
+      referral,
+    });
+
+    const state = h.getLedger();
+    // Absent-referral: platform += p + remainder + r.
+    expect(state.platform_accrued).toBe(
+      platformAfterBuy + sellCuts.p + sellCuts.remainder + sellCuts.r,
+    );
+    expect(state.creator_accrued).toBe(creatorAfterBuy + sellCuts.c);
+    expect(state.tokens_sold).toBe(0n);
+    expect(state.night_reserve).toBe(0n);
+    expect(state.balances.lookup(trader)).toBe(0n);
+  });
+
+  it('sell beyond balance rejected', async () => {
+    const basePrice = 1000n;
+    const slope = 1n;
+    const feeBps = 100;
+    const pBps = 5000;
+    const cBps = 4000;
+    const rBps = 1000;
+    const h = await deployInSimulator({
+      basePrice,
+      slope,
+      maxSupply: 1_000_000n,
+      feeBps,
+      pBps,
+      cBps,
+      rBps,
+    });
+    const trader = new Uint8Array(32).fill(9);
+    const referral = new Uint8Array(32);
+
+    // Buy 10 tokens first.
+    const cost = curveCostBuy(0n, 10n, basePrice, slope);
+    const cuts = rawCuts(cost, feeBps, pBps, cBps, rBps);
+    h.buy({
+      buyer: trader,
+      nTokens: 10n,
+      curveCost: cost,
+      feeTotal: cuts.fee,
+      pCut: cuts.p,
+      cCut: cuts.c,
+      rCut: cuts.r,
+      remainder: cuts.remainder,
+      hasReferral: false,
+      referral,
+    });
+
+    // Attempting to sell 11 (one more than owned) must be rejected by the
+    // circuit. curvePayoutSell(10,11) would throw in TS, so supply zeros —
+    // the circuit's "sell > tokens_sold" / "insufficient balance" assertions
+    // fire before any curve-identity check.
+    expect(() =>
+      h.sell({
+        seller: trader,
+        nTokens: 11n,
+        curvePayout: 0n,
+        feeTotal: 0n,
+        pCut: 0n,
+        cCut: 0n,
+        rCut: 0n,
+        remainder: 0n,
+        hasReferral: false,
+        referral,
+      }),
+    ).toThrow();
+  });
+
+  it('sell of 0 rejected', async () => {
+    const h = await deployInSimulator();
+    const trader = new Uint8Array(32).fill(9);
+    const referral = new Uint8Array(32);
+
+    expect(() =>
+      h.sell({
+        seller: trader,
+        nTokens: 0n,
+        curvePayout: 0n,
+        feeTotal: 0n,
+        pCut: 0n,
+        cCut: 0n,
+        rCut: 0n,
+        remainder: 0n,
+        hasReferral: false,
+        referral,
+      }),
+    ).toThrow(/zero tokens/);
   });
 });

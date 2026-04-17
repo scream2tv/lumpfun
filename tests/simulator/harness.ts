@@ -115,8 +115,22 @@ export interface BuyArgs {
   referral: Uint8Array;
 }
 
+export interface SellArgs {
+  seller: Uint8Array;
+  nTokens: bigint;
+  curvePayout: bigint;
+  feeTotal: bigint;
+  pCut: bigint;
+  cCut: bigint;
+  rCut: bigint;
+  remainder: bigint;
+  hasReferral: boolean;
+  referral: Uint8Array;
+}
+
 export interface SimulatorHandle {
   buy(args: BuyArgs): void;
+  sell(args: SellArgs): void;
   getLedger(): LedgerView;
 }
 
@@ -206,6 +220,34 @@ export async function deployInSimulator(
         buyer,
         nTokens,
         curveCost,
+        feeTotal,
+        pCut,
+        cCut,
+        rCut,
+        remainder,
+        hasReferral,
+        referral,
+      );
+      context = nextCtx;
+    },
+    sell(args: SellArgs) {
+      const {
+        seller,
+        nTokens,
+        curvePayout,
+        feeTotal,
+        pCut,
+        cCut,
+        rCut,
+        remainder,
+        hasReferral,
+        referral,
+      } = args;
+      const { context: nextCtx } = contract.circuits.sell!(
+        context,
+        seller,
+        nTokens,
+        curvePayout,
         feeTotal,
         pCut,
         cCut,
