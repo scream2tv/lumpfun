@@ -26,6 +26,8 @@ import {
 } from '@midnight-ntwrk/midnight-js-contracts';
 import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { assertPreprod, explorerLink } from './config.js';
+import { curveCostBuy, curvePayoutSell } from './curve.js';
+import { computeFeeSplit } from './fees.js';
 import { createContractProviders } from './night.js';
 import type { InitializedWallet } from './wallet.js';
 
@@ -333,6 +335,44 @@ export async function deployLaunch(
 }
 
 /**
+ * Lower-level helper: bind to an already-deployed `lump_launch` contract
+ * and return the raw `FoundContract` object (the thing with `.callTx`) along
+ * with the providers + compiled module. Task 15's `buy`/`sell`/`transfer`
+ * wrappers call this to invoke circuits; `connectLaunch` wraps it and
+ * projects the result through `readLedger`/`ledgerToHandle`.
+ *
+ * Keeping this private (non-exported) for now — callers only need the
+ * high-level `LaunchHandle` API. Promote to exported if external consumers
+ * emerge.
+ */
+async function loadContractHandle(
+  wallet: InitializedWallet,
+  contractAddress: string,
+): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contract: any;
+  providers: Awaited<ReturnType<typeof createContractProviders>>;
+  mod: CompiledModule;
+}> {
+  const { compiledContract, mod } = await loadAndWrapCompiledContract();
+  const providers = await createContractProviders(wallet, LUMP_LAUNCH_DIR);
+
+  // We call findDeployedContract for its side effects (verifier-key check,
+  // signing-key bookkeeping, private-state slot init) and for access to the
+  // returned `callTx` interface used by the action wrappers.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const contract = await findDeployedContract(providers as any, {
+    compiledContract,
+    contractAddress: contractAddress as ContractAddress,
+    privateStateId: 'launchState',
+    initialPrivateState: {},
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any);
+
+  return { contract, providers, mod };
+}
+
+/**
  * Binds to an already-deployed `lump_launch` contract at `contractAddress`
  * and returns a `LaunchHandle` populated from the on-chain ledger state.
  */
@@ -341,24 +381,7 @@ export async function connectLaunch(
   contractAddress: string,
 ): Promise<LaunchHandle> {
   assertPreprod();
-
-  const { compiledContract, mod } = await loadAndWrapCompiledContract();
-  const providers = await createContractProviders(wallet, LUMP_LAUNCH_DIR);
-
-  // We call findDeployedContract for its side effects (verifier-key check,
-  // signing-key bookkeeping, private-state slot init) even though for the
-  // immediate read we go through the public-data provider. This matches
-  // what the reference's `connectToken` does and ensures subsequent mutating
-  // calls from Task 15/16 can find the expected local state.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await findDeployedContract(providers as any, {
-    compiledContract,
-    contractAddress: contractAddress as ContractAddress,
-    privateStateId: 'launchState',
-    initialPrivateState: {},
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any);
-
+  const { providers, mod } = await loadContractHandle(wallet, contractAddress);
   const ledger = await readLedger(providers, contractAddress, mod);
   return ledgerToHandle(contractAddress, ledger);
 }
@@ -397,4 +420,239 @@ export async function getReferralAccrued(
   return ledger.referrals_accrued.member(key)
     ? ledger.referrals_accrued.lookup(key)
     : 0n;
+}
+
+// ─── Task 15: buy / sell / transfer + quote helpers ─────────────────────
+
+/**
+ * A caller-computed quote for a `buy` or `sell`. The `split` values are the
+ * POST-routing fee shares (i.e., when `referralPresent=false`, the referral
+ * cut has already been folded into `platform`) — this matches what the
+ * on-chain `platform_accrued` / `creator_accrued` / `referrals_accrued` will
+ * end up holding after the call lands, so it's the right shape for display
+ * and verification.
+ *
+ * The RAW (pre-routing) cuts — which the `buy`/`sell` circuits actually
+ * consume — are computed separately by `rawCutsForCircuit` and are not
+ * surfaced to callers; they're an implementation detail of the wrapper.
+ */
+export interface TradeQuote {
+  curveSide: bigint; // curve_cost (buy) or curve_payout (sell)
+  fee: bigint;
+  split: { platform: bigint; creator: bigint; referral: bigint };
+  grossPayByBuyer?: bigint; // buys only: curveSide + fee
+  netReceivedBySeller?: bigint; // sells only: curveSide - fee
+}
+
+/**
+ * Computes a buy quote off-chain using the same formulas the circuit
+ * enforces. `referralPresent` controls the routed split: when false, the
+ * referral cut flows into `platform` (matching the chain's behavior when
+ * `has_referral=false`).
+ */
+export function quoteBuy(
+  launch: LaunchHandle,
+  nTokens: bigint,
+  referralPresent = false,
+): TradeQuote {
+  const curveCost = curveCostBuy(
+    launch.state.tokensSold,
+    nTokens,
+    launch.curve.basePriceNight,
+    launch.curve.slopeNight,
+  );
+  const { fee, split } = computeFeeSplit({
+    curveSide: curveCost,
+    feeBps: launch.fees.feeBps,
+    platformShareBps: launch.fees.platformShareBps,
+    creatorShareBps: launch.fees.creatorShareBps,
+    referralShareBps: launch.fees.referralShareBps,
+    referralPresent,
+  });
+  return {
+    curveSide: curveCost,
+    fee,
+    split,
+    grossPayByBuyer: curveCost + fee,
+  };
+}
+
+/**
+ * Computes a sell quote off-chain. `launch.state.tokensSold` is passed as
+ * `tokensSoldBefore`; `curvePayoutSell` handles the `tokens_sold - n`
+ * subtraction internally to yield the integral over the range vacated by
+ * the sell.
+ */
+export function quoteSell(
+  launch: LaunchHandle,
+  nTokens: bigint,
+  referralPresent = false,
+): TradeQuote {
+  const curvePayout = curvePayoutSell(
+    launch.state.tokensSold,
+    nTokens,
+    launch.curve.basePriceNight,
+    launch.curve.slopeNight,
+  );
+  const { fee, split } = computeFeeSplit({
+    curveSide: curvePayout,
+    feeBps: launch.fees.feeBps,
+    platformShareBps: launch.fees.platformShareBps,
+    creatorShareBps: launch.fees.creatorShareBps,
+    referralShareBps: launch.fees.referralShareBps,
+    referralPresent,
+  });
+  return {
+    curveSide: curvePayout,
+    fee,
+    split,
+    netReceivedBySeller: curvePayout - fee,
+  };
+}
+
+/**
+ * Computes the RAW (pre-routing) fee cuts the `buy`/`sell` circuits expect.
+ * The circuit re-derives these with the same floor-division formulas and
+ * rejects the tx if any value disagrees; callers MUST use these exact
+ * values (not the post-routing `TradeQuote.split`) when building the tx.
+ *
+ * Kept internal — callers should not need to see the raw shape.
+ */
+function rawCutsForCircuit(
+  launch: LaunchHandle,
+  curveSide: bigint,
+): {
+  fee: bigint;
+  p: bigint;
+  c: bigint;
+  r: bigint;
+  remainder: bigint;
+} {
+  const fee = (curveSide * BigInt(launch.fees.feeBps)) / 10000n;
+  const p = (fee * BigInt(launch.fees.platformShareBps)) / 10000n;
+  const c = (fee * BigInt(launch.fees.creatorShareBps)) / 10000n;
+  const r = (fee * BigInt(launch.fees.referralShareBps)) / 10000n;
+  const remainder = fee - p - c - r;
+  return { fee, p, c, r, remainder };
+}
+
+/**
+ * Buys `nTokens` of the launch's token from the bonding curve. Caller pays
+ * `quote.grossPayByBuyer = curveCost + fee` in NIGHT; the fee is split
+ * across platform / creator / referral per the launch's config.
+ *
+ * The `referral` arg (if provided) is a 32-byte-hex ZswapCoinPublicKey that
+ * gets credited with the referral share of the fee; when absent, that share
+ * routes to platform.
+ */
+export async function buy(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+  nTokens: bigint,
+  referral?: string,
+): Promise<{ txId: string; quote: TradeQuote }> {
+  assertPreprod();
+
+  const quote = quoteBuy(launch, nTokens, referral !== undefined);
+  const raw = rawCutsForCircuit(launch, quote.curveSide);
+
+  const buyer = hexToBytes32(
+    wallet.keys.shielded.keys.coinPublicKey,
+    'wallet.coinPublicKey',
+  );
+  const hasReferral = referral !== undefined;
+  const refBytes = hasReferral
+    ? hexToBytes32(referral!, 'referral')
+    : new Uint8Array(32);
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // `callTx` is strongly typed on `FoundContract<C>`, but `C` here is the
+  // widened-to-any `unknown` contract we fed through buildCompiled — so we
+  // narrow at the seam. The arg order matches `Circuits<PS>.buy(...)` in
+  // `contracts/managed/lump_launch/contract/index.d.ts`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).buy(
+    buyer,
+    nTokens,
+    quote.curveSide,
+    raw.fee,
+    raw.p,
+    raw.c,
+    raw.r,
+    raw.remainder,
+    hasReferral,
+    refBytes,
+  );
+
+  return { txId: tx.public.txId, quote };
+}
+
+/**
+ * Sells `nTokens` back to the bonding curve. Caller receives
+ * `quote.netReceivedBySeller = curvePayout - fee` in NIGHT; the fee is
+ * split the same way as on buy.
+ */
+export async function sell(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+  nTokens: bigint,
+  referral?: string,
+): Promise<{ txId: string; quote: TradeQuote }> {
+  assertPreprod();
+
+  const quote = quoteSell(launch, nTokens, referral !== undefined);
+  const raw = rawCutsForCircuit(launch, quote.curveSide);
+
+  const seller = hexToBytes32(
+    wallet.keys.shielded.keys.coinPublicKey,
+    'wallet.coinPublicKey',
+  );
+  const hasReferral = referral !== undefined;
+  const refBytes = hasReferral
+    ? hexToBytes32(referral!, 'referral')
+    : new Uint8Array(32);
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).sell(
+    seller,
+    nTokens,
+    quote.curveSide,
+    raw.fee,
+    raw.p,
+    raw.c,
+    raw.r,
+    raw.remainder,
+    hasReferral,
+    refBytes,
+  );
+
+  return { txId: tx.public.txId, quote };
+}
+
+/**
+ * Transfers `amount` of the launch's token from the wallet's address to
+ * `to`. The `from` address is derived from the wallet's shielded coin
+ * pubkey; callers wanting to transfer from a different identity must swap
+ * wallets first.
+ */
+export async function transfer(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+  to: string,
+  amount: bigint,
+): Promise<{ txId: string }> {
+  assertPreprod();
+
+  const from = hexToBytes32(
+    wallet.keys.shielded.keys.coinPublicKey,
+    'wallet.coinPublicKey',
+  );
+  const toBytes = hexToBytes32(to, 'to');
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).transfer(from, toBytes, amount);
+
+  return { txId: tx.public.txId };
 }
