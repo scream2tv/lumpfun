@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { curveCostBuy, curvePayoutSell } from '../../src/curve.js';
+import { curveCostBuy, curvePayoutSell, currentPrice } from '../../src/curve.js';
 
 describe('curve math', () => {
   const base = 1000n;
@@ -43,5 +43,21 @@ describe('curve math', () => {
     const delta = 17n;
     const expected = base * delta + slope * (from * delta + delta * (delta - 1n) / 2n);
     expect(curveCostBuy(from, delta, base, slope)).toBe(expected);
+  });
+
+  it('currentPrice is base + slope*tokensSold', () => {
+    expect(currentPrice(0n, base, slope)).toBe(base);
+    expect(currentPrice(5n, 1000n, 1n)).toBe(1005n);
+    expect(currentPrice(100n, 2000n, 3n)).toBe(2300n);
+  });
+
+  it('curvePayoutSell throws when tokensSoldBefore < delta', () => {
+    expect(() => curvePayoutSell(5n, 10n, base, slope)).toThrow(/tokensSoldBefore/);
+    expect(() => curvePayoutSell(0n, 1n, base, slope)).toThrow(/tokensSoldBefore/);
+  });
+
+  it('curvePayoutSell zero-delta returns zero (even when tokensSoldBefore is zero)', () => {
+    expect(curvePayoutSell(0n, 0n, base, slope)).toBe(0n);
+    expect(curvePayoutSell(100n, 0n, base, slope)).toBe(0n);
   });
 });
