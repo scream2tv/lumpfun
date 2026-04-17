@@ -656,3 +656,64 @@ export async function transfer(
 
   return { txId: tx.public.txId };
 }
+
+// ─── Task 16: withdraw_{platform,creator,referral} wrappers ─────────────
+
+/**
+ * Sweeps the platform-accrued NIGHT balance to the launch's immutable
+ * `platform_recipient`. The destination is fixed in the contract's
+ * immutable state, so anyone may call this; it zeros `platform_accrued`
+ * and sends the accumulated amount via `sendUnshielded`.
+ */
+export async function withdrawPlatform(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+): Promise<{ txId: string }> {
+  assertPreprod();
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).withdraw_platform();
+
+  return { txId: tx.public.txId };
+}
+
+/**
+ * Sweeps the creator-accrued NIGHT balance to the launch's immutable
+ * `creator_pubkey`. Same rationale as `withdrawPlatform` — destination is
+ * fixed on-chain, so the caller identity is irrelevant.
+ */
+export async function withdrawCreator(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+): Promise<{ txId: string }> {
+  assertPreprod();
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).withdraw_creator();
+
+  return { txId: tx.public.txId };
+}
+
+/**
+ * Sweeps the referrer-accrued NIGHT balance for `ref` (32-byte hex) to
+ * that same `ref` address. Zeros `referrals_accrued[ref]` and sends the
+ * accumulated amount to `ref`. Anyone may call — the destination is the
+ * referrer key itself, not the caller.
+ */
+export async function withdrawReferral(
+  wallet: InitializedWallet,
+  launch: LaunchHandle,
+  ref: string,
+): Promise<{ txId: string }> {
+  assertPreprod();
+
+  const refBytes = hexToBytes32(ref, 'ref');
+
+  const { contract } = await loadContractHandle(wallet, launch.contractAddress);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tx = await (contract.callTx as any).withdraw_referral(refBytes);
+
+  return { txId: tx.public.txId };
+}
