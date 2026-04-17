@@ -133,11 +133,11 @@ export interface NodeHealth {
 }
 
 export async function rpcHealth(config?: MidnightConfig): Promise<NodeHealth> {
-  const r = (await rpcCall('system_health', [], config)) as Record<string, unknown>;
+  const r = (await rpcCall('system_health', [], config)) as Record<string, unknown> | null;
   return {
-    peers: (r.peers as number) ?? 0,
-    isSyncing: (r.isSyncing as boolean) ?? true,
-    shouldHavePeers: (r.shouldHavePeers as boolean) ?? true,
+    peers: (r?.peers as number) ?? 0,
+    isSyncing: (r?.isSyncing as boolean) ?? true,
+    shouldHavePeers: (r?.shouldHavePeers as boolean) ?? true,
   };
 }
 
@@ -152,7 +152,7 @@ export async function getTxByHash(
   hash: string,
   config?: MidnightConfig,
 ): Promise<Record<string, unknown> | null> {
-  const q = `query { transaction(hash: "${hash}") { hash blockHash blockHeight protocolVersion } }`;
-  const result = await queryIndexer(q, undefined, config);
+  const q = 'query ($hash: HexEncoded!) { transaction(hash: $hash) { hash blockHash blockHeight protocolVersion } }';
+  const result = await queryIndexer(q, { hash }, config);
   return (result.transaction as Record<string, unknown> | null) ?? null;
 }
