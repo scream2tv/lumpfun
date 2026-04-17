@@ -1,0 +1,119 @@
+// note: deviations from template forced by compact 0.22 language:
+//   (1) `let` is reserved — use `const` for locals.
+//   (2) No `/` or `>>` operators; curve_quote_* circuits return 2x the quote
+//       so the `n*(n-1)/2` term becomes `n*(n-1)` on-chain. Caller divides by 2.
+//   (3) `Uint<128>*Uint<128>` can exceed Uint<248>-max; cast operands to `Field`
+//       then cast the final result back to `Uint<128>`.
+//   (4) `Map.lookup(k)` throws on miss — `balance_of` guards with `.member(k)`.
+pragma language_version >= 0.21.0;
+import CompactStandardLibrary;
+
+// ─── Immutable metadata ───────────────────────────────────────────────
+export ledger name:            Opaque<"string">;
+export ledger symbol:          Opaque<"string">;
+export ledger decimals:        Uint<8>;
+export ledger image_uri:       Opaque<"string">;
+export ledger creator_pubkey:  Bytes<32>;
+
+// ─── Immutable bonding-curve parameters ───────────────────────────────
+export ledger base_price_night: Uint<128>;
+export ledger slope_night:      Uint<128>;
+export ledger max_supply:       Uint<128>;
+
+// ─── Immutable fee config ─────────────────────────────────────────────
+export ledger fee_bps:             Uint<16>;
+export ledger platform_share_bps:  Uint<16>;
+export ledger creator_share_bps:   Uint<16>;
+export ledger referral_share_bps:  Uint<16>;
+export ledger platform_recipient:  Bytes<32>;
+export ledger creator_recipient:   Bytes<32>;
+
+// ─── Live mutable state ───────────────────────────────────────────────
+export ledger tokens_sold:        Uint<128>;
+export ledger night_reserve:      Uint<128>;
+export ledger platform_accrued:   Uint<128>;
+export ledger creator_accrued:    Uint<128>;
+export ledger referrals_accrued:  Map<Bytes<32>, Uint<128>>;
+export ledger balances:           Map<Bytes<32>, Uint<128>>;
+
+constructor(
+  name_:              Opaque<"string">,
+  symbol_:            Opaque<"string">,
+  decimals_:          Uint<8>,
+  image_uri_:         Opaque<"string">,
+  creator_:           Bytes<32>,
+  base_price_:        Uint<128>,
+  slope_:             Uint<128>,
+  max_supply_:        Uint<128>,
+  fee_bps_:           Uint<16>,
+  p_bps_:             Uint<16>,
+  c_bps_:             Uint<16>,
+  r_bps_:             Uint<16>,
+  platform_recip_:    Bytes<32>,
+  creator_recip_:     Bytes<32>,
+) {
+  assert((p_bps_ as Uint<32>) + (c_bps_ as Uint<32>) + (r_bps_ as Uint<32>) == 10000, "share sum != 10000");
+  assert(fee_bps_ <= 2000, "fee_bps > 2000");
+
+  name               = disclose(name_);
+  symbol             = disclose(symbol_);
+  decimals           = disclose(decimals_);
+  image_uri          = disclose(image_uri_);
+  creator_pubkey     = disclose(creator_);
+
+  base_price_night   = disclose(base_price_);
+  slope_night        = disclose(slope_);
+  max_supply         = disclose(max_supply_);
+
+  fee_bps            = disclose(fee_bps_);
+  platform_share_bps = disclose(p_bps_);
+  creator_share_bps  = disclose(c_bps_);
+  referral_share_bps = disclose(r_bps_);
+  platform_recipient = disclose(platform_recip_);
+  creator_recipient  = disclose(creator_recip_);
+
+  tokens_sold        = 0;
+  night_reserve      = 0;
+  platform_accrued   = 0;
+  creator_accrued    = 0;
+  // Map fields initialize empty by default.
+}
+
+export circuit balance_of(addr: Bytes<32>): Uint<128> {
+  if (!balances.member(disclose(addr))) {
+    return 0;
+  }
+  return balances.lookup(disclose(addr));
+}
+
+export circuit current_price(): Uint<128> {
+  return ((base_price_night as Field)
+          + (slope_night as Field) * (tokens_sold as Field)) as Uint<128>;
+}
+
+// Returns 2x the buy quote (caller must divide by 2).
+// Compact lacks division; formula `base*n + slope*(tokens_sold*n + n*(n-1)/2)`
+// is computed as its double: `2*base*n + slope*(2*tokens_sold*n + n*(n-1))`.
+// Since `n*(n-1)` is always even, the client gets the exact true quote after /2.
+// Operands cast to Field because Uint<128>*Uint<128> can exceed Uint<248> max.
+export circuit curve_quote_buy(n_tokens: Uint<128>): Uint<128> {
+  const n: Field = disclose(n_tokens) as Field;
+  const base: Field = base_price_night as Field;
+  const slope: Field = slope_night as Field;
+  const sold: Field = tokens_sold as Field;
+  return (base * n * 2
+          + slope * (sold * n * 2 + n * (n - 1))) as Uint<128>;
+}
+
+// Returns 2x the sell quote (caller must divide by 2). Same doubling rationale
+// as curve_quote_buy.
+export circuit curve_quote_sell(n_tokens: Uint<128>): Uint<128> {
+  const n_u: Uint<128> = disclose(n_tokens);
+  assert(tokens_sold >= n_u, "sell > tokens_sold");
+  const n: Field = n_u as Field;
+  const base: Field = base_price_night as Field;
+  const slope: Field = slope_night as Field;
+  const from_after: Field = ((tokens_sold - n_u) as Uint<128>) as Field;
+  return (base * n * 2
+          + slope * (from_after * n * 2 + n * (n - 1))) as Uint<128>;
+}
