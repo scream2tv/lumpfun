@@ -117,3 +117,124 @@ export circuit curve_quote_sell(n_tokens: Uint<128>): Uint<128> {
   return (base * n * 2
           + slope * (from_after * n * 2 + n * (n - 1))) as Uint<128>;
 }
+
+// Buys `n_tokens` from the bonding curve. Compact 0.22 has no division, so
+// curve_cost/fee/p_cut/c_cut/r_cut/remainder are computed off-chain (see
+// src/curve.ts + src/fees.ts) and the circuit verifies each via
+// multiplication + comparison. Uint<128>*Uint<128> operands are cast to
+// Field to avoid Uint<248> overflow (same rationale as the view circuits).
+export circuit buy(
+  buyer:        Bytes<32>,
+  n_tokens:     Uint<128>,
+  curve_cost:   Uint<128>,
+  fee_total:    Uint<128>,
+  p_cut:        Uint<128>,
+  c_cut:        Uint<128>,
+  r_cut:        Uint<128>,
+  remainder:    Uint<128>,
+  has_referral: Boolean,
+  referral:     Bytes<32>,
+): [] {
+  const n_u: Uint<128> = disclose(n_tokens);
+  const curve_cost_u: Uint<128> = disclose(curve_cost);
+  const fee_total_u: Uint<128> = disclose(fee_total);
+  const p_cut_u: Uint<128> = disclose(p_cut);
+  const c_cut_u: Uint<128> = disclose(c_cut);
+  const r_cut_u: Uint<128> = disclose(r_cut);
+  const remainder_u: Uint<128> = disclose(remainder);
+  const has_referral_u: Boolean = disclose(has_referral);
+  const buyer_u: Bytes<32> = disclose(buyer);
+  const referral_u: Bytes<32> = disclose(referral);
+
+  // (1) Amount > 0.
+  assert(n_u > 0, "zero tokens");
+
+  // (2) Supply cap: sold + n <= max_supply. Use Field for the sum (to avoid
+  // Uint<128> overflow on the addition), then cast back to Uint<128> where
+  // comparison is well-defined.
+  const sold_f: Field = tokens_sold as Field;
+  const n_f: Field = n_u as Field;
+  const new_sold_f: Field = sold_f + n_f;
+  const new_sold_u: Uint<128> = new_sold_f as Uint<128>;
+  assert(new_sold_u <= max_supply, "exceeds supply");
+
+  // (3) Curve integral (doubled form, same as curve_quote_buy):
+  //     2*curve_cost == 2*base*n + slope*(2*sold*n + n*(n-1))
+  // Field equality works; comparison requires cast back to Uint<128>.
+  const base_f: Field = base_price_night as Field;
+  const slope_f: Field = slope_night as Field;
+  const curve_cost_f: Field = curve_cost_u as Field;
+  const expected_2x: Field =
+    base_f * n_f * 2 + slope_f * (sold_f * n_f * 2 + n_f * (n_f - 1));
+  assert(curve_cost_f + curve_cost_f == expected_2x, "bad curve_cost");
+
+  // (4) Fee floor: fee = floor(curve_cost * fee_bps / 10000).
+  //     fee*10000 <= curve_cost*fee_bps < (fee+1)*10000.
+  // All comparison operands cast back to Uint<128> via a wider-bounded
+  // intermediate: Field -> Uint<248> would also work, but Uint<128> is enough
+  // because cc*fb < 2^128 * 2^16 = 2^144 which exceeds Uint<128>. Need a
+  // bigger cast target. We use Uint<248> to be safe.
+  const fb_f: Field = fee_bps as Field;
+  const fee_f: Field = fee_total_u as Field;
+  const fee_p1_f: Field = fee_f + 1;
+  const cc_fb_f: Field = curve_cost_f * fb_f;
+  assert((fee_f * 10000) as Uint<248> <= cc_fb_f as Uint<248>, "fee_total too high");
+  assert((fee_p1_f * 10000) as Uint<248> > cc_fb_f as Uint<248>, "fee_total too low");
+
+  // (5) Platform cut floor: p_cut = floor(fee * platform_share_bps / 10000).
+  const p_bps_f: Field = platform_share_bps as Field;
+  const p_f: Field = p_cut_u as Field;
+  const p_p1_f: Field = p_f + 1;
+  const fp_f: Field = fee_f * p_bps_f;
+  assert((p_f * 10000) as Uint<248> <= fp_f as Uint<248>, "p_cut too high");
+  assert((p_p1_f * 10000) as Uint<248> > fp_f as Uint<248>, "p_cut too low");
+
+  // (6) Creator cut floor.
+  const c_bps_f: Field = creator_share_bps as Field;
+  const c_f: Field = c_cut_u as Field;
+  const c_p1_f: Field = c_f + 1;
+  const fc_f: Field = fee_f * c_bps_f;
+  assert((c_f * 10000) as Uint<248> <= fc_f as Uint<248>, "c_cut too high");
+  assert((c_p1_f * 10000) as Uint<248> > fc_f as Uint<248>, "c_cut too low");
+
+  // (7) Referral cut floor.
+  const r_bps_f: Field = referral_share_bps as Field;
+  const r_f: Field = r_cut_u as Field;
+  const r_p1_f: Field = r_f + 1;
+  const fr_f: Field = fee_f * r_bps_f;
+  assert((r_f * 10000) as Uint<248> <= fr_f as Uint<248>, "r_cut too high");
+  assert((r_p1_f * 10000) as Uint<248> > fr_f as Uint<248>, "r_cut too low");
+
+  // (8) Remainder identity: fee_total = p_cut + c_cut + r_cut + remainder.
+  // Field equality works.
+  const rem_f: Field = remainder_u as Field;
+  assert(fee_f == p_f + c_f + r_f + rem_f, "bad remainder");
+
+  // (9) Claim NIGHT from the tx's unshielded input.
+  const total_in_f: Field = curve_cost_f + fee_f;
+  receiveUnshielded(nativeToken(), total_in_f as Uint<128>);
+
+  // (10) State updates.
+  tokens_sold   = new_sold_u;
+  night_reserve = ((night_reserve as Field) + curve_cost_f) as Uint<128>;
+
+  // balances[buyer] += n (start from 0 on miss).
+  const prev_bal: Uint<128> = balances.member(buyer_u)
+    ? balances.lookup(buyer_u)
+    : 0;
+  balances.insert(buyer_u, ((prev_bal as Field) + n_f) as Uint<128>);
+
+  creator_accrued = ((creator_accrued as Field) + c_f) as Uint<128>;
+
+  if (has_referral_u) {
+    // referrals_accrued[referral] += r_cut (start from 0 on miss).
+    const prev_ref: Uint<128> = referrals_accrued.member(referral_u)
+      ? referrals_accrued.lookup(referral_u)
+      : 0;
+    referrals_accrued.insert(referral_u, ((prev_ref as Field) + r_f) as Uint<128>);
+    platform_accrued = ((platform_accrued as Field) + p_f + rem_f) as Uint<128>;
+  } else {
+    // Absent-referral: r_cut routes to platform as well.
+    platform_accrued = ((platform_accrued as Field) + p_f + rem_f + r_f) as Uint<128>;
+  }
+}
