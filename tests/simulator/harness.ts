@@ -145,6 +145,12 @@ export interface SimulatorHandle {
   withdrawPlatform(): void;
   withdrawCreator(): void;
   withdrawReferral(args: WithdrawReferralArgs): void;
+  // View circuits — read-only; they don't mutate state but the simulator still
+  // returns a fresh context, so we thread it through like the mutating ones.
+  curveQuoteBuy(nTokens: bigint): bigint;
+  curveQuoteSell(nTokens: bigint): bigint;
+  currentPrice(): bigint;
+  balanceOf(addr: Uint8Array): bigint;
   getLedger(): LedgerView;
 }
 
@@ -303,6 +309,37 @@ export async function deployInSimulator(
         ref,
       );
       context = nextCtx;
+    },
+    curveQuoteBuy(nTokens: bigint): bigint {
+      const { result, context: nextCtx } = contract.circuits.curve_quote_buy!(
+        context,
+        nTokens,
+      );
+      context = nextCtx;
+      return result as bigint;
+    },
+    curveQuoteSell(nTokens: bigint): bigint {
+      const { result, context: nextCtx } = contract.circuits.curve_quote_sell!(
+        context,
+        nTokens,
+      );
+      context = nextCtx;
+      return result as bigint;
+    },
+    currentPrice(): bigint {
+      const { result, context: nextCtx } = contract.circuits.current_price!(
+        context,
+      );
+      context = nextCtx;
+      return result as bigint;
+    },
+    balanceOf(addr: Uint8Array): bigint {
+      const { result, context: nextCtx } = contract.circuits.balance_of!(
+        context,
+        addr,
+      );
+      context = nextCtx;
+      return result as bigint;
     },
     getLedger(): LedgerView {
       return mod.ledger(context.currentQueryContext.state);
