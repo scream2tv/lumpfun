@@ -1,0 +1,38 @@
+pragma language_version >= 0.21.0;
+import CompactStandardLibrary;
+
+// DR-1 spike: native NIGHT into/out of a Compact contract.
+//
+// Signatures confirmed via compile error introspection:
+//   nativeToken(): Bytes<32>                  — returns NIGHT's raw token type (color)
+//   receiveUnshielded(tt: Bytes<32>, amount: Uint<128>)
+//       — declares this circuit call claims `amount` of `tt` from the tx's
+//         unshielded inputs. The wallet will supply a matching unshielded input.
+//   sendUnshielded(tt: Bytes<32>, amount: Uint<128>,
+//                  recipient: Either<ContractAddress, UserAddress>)
+//       — authorizes this circuit call to emit `amount` of `tt` as an
+//         unshielded output to `recipient`.
+//
+// Recipient type is Either<ContractAddress, UserAddress> (unshielded
+// addressing). Contracts are addressed by ContractAddress, users by
+// UserAddress. Both wrap Bytes<32>.
+
+export ledger deposited: Uint<128>;
+
+export circuit deposit(amount: Uint<128>): [] {
+  receiveUnshielded(nativeToken(), disclose(amount));
+  deposited = (deposited + disclose(amount)) as Uint<128>;
+}
+
+export circuit withdraw(
+  to: Either<ContractAddress, UserAddress>,
+  amount: Uint<128>
+): [] {
+  assert(deposited >= amount, "insufficient reserve");
+  sendUnshielded(nativeToken(), disclose(amount), disclose(to));
+  deposited = (deposited - disclose(amount)) as Uint<128>;
+}
+
+export circuit read(): Uint<128> {
+  return deposited;
+}
