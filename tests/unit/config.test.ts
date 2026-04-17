@@ -42,4 +42,20 @@ describe('config', () => {
     const { assertPreprod } = await import('../../src/config.js');
     expect(() => assertPreprod()).toThrow(/preprod/i);
   });
+
+  it('throws on uppercase MAINNET in URL override (case-insensitive scan)', async () => {
+    process.env.MIDNIGHT_NETWORK = 'preprod';
+    process.env.MIDNIGHT_RPC_URL = 'https://rpc.MAINNET.midnight.network/';
+    delete process.env.LUMPFUN_ALLOW_MAINNET;
+    const { getConfig } = await import('../../src/config.js');
+    expect(() => getConfig()).toThrow(/mainnet/i);
+  });
+
+  it('assertPreprod rejects mixed state (ALLOW_MAINNET=1 + preprod label + mainnet URL)', async () => {
+    process.env.MIDNIGHT_NETWORK = 'preprod';
+    process.env.LUMPFUN_ALLOW_MAINNET = '1';
+    process.env.MIDNIGHT_RPC_URL = 'https://rpc.mainnet.midnight.network/';
+    const { assertPreprod } = await import('../../src/config.js');
+    expect(() => assertPreprod()).toThrow(/mainnet/i);
+  });
 });

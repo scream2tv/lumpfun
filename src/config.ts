@@ -73,7 +73,7 @@ export function getConfig(): MidnightConfig {
 
   if (!mainnetAllowed()) {
     for (const [k, v] of Object.entries(cfg)) {
-      if (typeof v === 'string' && v.includes('mainnet.')) {
+      if (typeof v === 'string' && v.toLowerCase().includes('mainnet.')) {
         throw new Error(
           `Config URL points at mainnet (${k}=${v}). LumpFun v0 is preprod-only.`,
         );
@@ -88,6 +88,13 @@ export function assertPreprod(): void {
   const cfg = getConfig();
   if (cfg.networkId !== 'preprod') {
     throw new Error(`assertPreprod() failed: networkId=${cfg.networkId}`);
+  }
+  for (const [k, v] of Object.entries(cfg)) {
+    if (typeof v === 'string' && v.toLowerCase().includes('mainnet.')) {
+      throw new Error(
+        `assertPreprod() failed: ${k}=${v} points at mainnet despite networkId=preprod`,
+      );
+    }
   }
 }
 
