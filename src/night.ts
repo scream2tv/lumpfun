@@ -49,6 +49,8 @@ export async function createContractProviders(
     getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
 
     async balanceTx(tx: unknown, ttl?: Date) {
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE balance', tx);
+
       const recipe = await wallet.facade.balanceUnboundTransaction(
         tx as never,
         {
@@ -60,6 +62,11 @@ export async function createContractProviders(
           ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000),
         },
       );
+
+      if (process.env.LUMPFUN_DEBUG_TX === '1') {
+        dumpTx('AFTER balance (baseTransaction)', recipe.baseTransaction);
+        if (recipe.balancingTransaction) dumpTx('AFTER balance (balancingTransaction)', recipe.balancingTransaction);
+      }
 
       const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
 
@@ -74,7 +81,16 @@ export async function createContractProviders(
         );
       }
 
-      return wallet.facade.finalizeRecipe(recipe);
+      if (process.env.LUMPFUN_DEBUG_TX === '1') {
+        dumpTx('AFTER sign (baseTransaction)', recipe.baseTransaction);
+        if (recipe.balancingTransaction) dumpTx('AFTER sign (balancingTransaction)', recipe.balancingTransaction);
+      }
+
+      const finalized = await wallet.facade.finalizeRecipe(recipe);
+
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER finalize', finalized);
+
+      return finalized;
     },
 
     submitTx: (tx: unknown) => wallet.facade.submitTransaction(tx as never),
@@ -148,6 +164,34 @@ interface OfferLike {
   inputs: unknown[];
   signatures: { at(i: number): unknown };
   addSignatures(sigs: unknown[]): OfferLike;
+}
+
+function dumpTx(label: string, tx: unknown): void {
+  const t = tx as TransactionWithIntents;
+  const intents = t.intents;
+  if (!intents || intents.size === 0) {
+    console.log(`[LUMPFUN_DEBUG_TX] ${label}: no intents`);
+    return;
+  }
+  for (const [segmentId, intent] of intents.entries()) {
+    const g = (intent as any).guaranteedUnshieldedOffer;
+    const f = (intent as any).fallibleUnshieldedOffer;
+    const describe = (name: string, offer: any) => {
+      if (!offer) return `${name}=none`;
+      const ins = offer.inputs?.length ?? '?';
+      const outs = offer.outputs?.length ?? '?';
+      let sigs = '?';
+      try {
+        const arr: unknown[] = [];
+        for (let i = 0; i < (offer.inputs?.length ?? 0); i++) {
+          arr.push(offer.signatures.at(i));
+        }
+        sigs = `${arr.length} (non-null: ${arr.filter((s) => s != null).length})`;
+      } catch {}
+      return `${name}=[in:${ins} out:${outs} sig:${sigs}]`;
+    };
+    console.log(`[LUMPFUN_DEBUG_TX] ${label} seg=${segmentId}: ${describe('guar', g)} ${describe('fall', f)}`);
+  }
 }
 
 function signTransactionIntents(
