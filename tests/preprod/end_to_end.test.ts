@@ -48,7 +48,7 @@ describe('preprod end-to-end', () => {
   run(
     'deploy -> buy -> sell -> withdraw platform + creator, all state deltas exact',
     async () => {
-      const wallet = await initWallet();
+      const wallet = await initWallet(undefined, { syncTimeoutMs: 40 * 60_000 });
       try {
         // ─── 1. Prerequisites: wallet has NIGHT + DUST ───────────────────
         const NIGHT = nightTokenKey();
@@ -144,6 +144,6 @@ describe('preprod end-to-end', () => {
         await stopWallet(wallet);
       }
     },
-    10 * 60_000, // 10-minute timeout
+    45 * 60_000, // 45-minute timeout — accounts for ~25-min wallet sync + 5 txs × ~60s
   );
 });
