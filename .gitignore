@@ -23,3 +23,5 @@ cardano-registry.json
 
 # tsbuildinfo
 *.tsbuildinfo
+.vercel
+.env*.local
