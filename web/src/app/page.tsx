@@ -16,20 +16,36 @@ export default function LandingPage() {
           'radial-gradient(ellipse at bottom, rgba(232,90,42,0.08), transparent 55%)',
       }}
     >
-      {/* Wordmark */}
+      {/* Wordmark — LUMP stays bright; FUN runs the teal→lava rift gradient. */}
       <h1
         className="text-center font-bold leading-none mb-6"
         style={{
           fontFamily: 'var(--font-outfit), system-ui, sans-serif',
           fontSize: 'clamp(56px, 14vw, 180px)',
           letterSpacing: '-0.04em',
-          background: 'linear-gradient(180deg, var(--text-bright) 0%, var(--text) 60%, rgba(92,224,210,0.25) 100%)',
-          WebkitBackgroundClip: 'text',
-          WebkitTextFillColor: 'transparent',
-          textShadow: '0 0 80px rgba(92,224,210,0.10)',
         }}
       >
-        LUMPFUN
+        <span
+          style={{
+            background: 'linear-gradient(180deg, var(--text-bright) 0%, var(--text) 70%, rgba(92,224,210,0.30) 100%)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            backgroundClip: 'text',
+          }}
+        >
+          LUMP
+        </span>
+        <span
+          style={{
+            background: 'linear-gradient(135deg, #5ce0d2 0%, #5ce0d2 35%, #ff6b35 70%, #e85a2a 100%)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            backgroundClip: 'text',
+            filter: 'drop-shadow(0 0 24px rgba(232,90,42,0.18))',
+          }}
+        >
+          FUN
+        </span>
       </h1>
 
       <p
