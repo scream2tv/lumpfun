@@ -89,21 +89,48 @@ export async function fetchTokenList(): Promise<TokenMeta[]> {
 export async function fetchTokenInfo(meta: TokenMeta) {
   const assetUnit = `${meta.policyId}${meta.assetName}`;
   const state = await fetchCurveState(meta.curveAddress, assetUnit);
-  if (!state) return null;
 
-  const { adaReserve, tokenReserve } = state;
-  const price = spotPrice(adaReserve, tokenReserve);
-  const mcap  = marketCap(adaReserve, tokenReserve);
+  // Curve UTxO still on chain — pre-graduation case.
+  if (state) {
+    const { adaReserve, tokenReserve } = state;
+    const price = spotPrice(adaReserve, tokenReserve);
+    const mcap  = marketCap(adaReserve, tokenReserve);
 
-  return {
-    ...meta,
-    adaReserve,
-    tokenReserve,
-    priceLovelace: price,
-    marketCapAda: Number(mcap) / 1_000_000,
-    bondedPct: Number(bondedBps(adaReserve)) / 100,
-    graduated: isGraduated(adaReserve),
-  };
+    return {
+      ...meta,
+      adaReserve,
+      tokenReserve,
+      priceLovelace: price,
+      marketCapAda: Number(mcap) / 1_000_000,
+      bondedPct: Number(bondedBps(adaReserve)) / 100,
+      graduated: isGraduated(adaReserve),
+    };
+  }
+
+  // Curve drained but the token has fully graduated to Minswap. Synthesise
+  // the TokenInfo from the recorded pool reserves so the feed still shows it
+  // (with bondedPct=100 and the Graduated badge from page templates).
+  if (meta.minswapPoolTxHash && meta.poolAdaLovelace && meta.poolTokens) {
+    const poolAda    = BigInt(meta.poolAdaLovelace);
+    const poolTokens = BigInt(meta.poolTokens);
+    const price      = poolTokens > 0n ? (poolAda * 1_000_000n) / poolTokens : 0n;
+    // Market cap from total supply at the closing price.
+    const TOTAL_SUPPLY = 1_000_000_000n;
+    const mcap = (price * TOTAL_SUPPLY) / 1_000_000n;
+    return {
+      ...meta,
+      adaReserve:    poolAda,
+      tokenReserve:  poolTokens,
+      priceLovelace: price,
+      marketCapAda:  Number(mcap) / 1_000_000,
+      bondedPct:     100,
+      graduated:     true,
+    };
+  }
+
+  // Drained but pool not yet created — leave it out of the feed until one of
+  // the two states above is reached.
+  return null;
 }
 
 // ── Holder count ──────────────────────────────────────────────────────────────
