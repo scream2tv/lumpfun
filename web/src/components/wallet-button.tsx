@@ -1,6 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import Image from 'next/image';
+import { useQuery } from '@tanstack/react-query';
 import { useWallet } from '@/lib/wallet';
 import {
   Dialog,
@@ -9,6 +12,18 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+
+interface AssetRow {
+  unit:     string;
+  quantity: string;
+  registry?: {
+    policyId:  string;
+    assetName: string;
+    ticker:    string;
+    name:      string;
+    imageUri?: string;
+  };
+}
 
 function truncate(addr: string) {
   if (addr.length < 16) return addr;
@@ -19,43 +34,209 @@ function adaDisplay(lovelace: bigint) {
   return `${(Number(lovelace) / 1_000_000).toFixed(2)} ₳`;
 }
 
-export function WalletButton() {
-  const { wallet, connecting, availableWallets, connect, disconnect } = useWallet();
-  const [open, setOpen] = useState(false);
+function fmtQty(q: string): string {
+  // Token quantities are integer strings; format for readability.
+  return Number(q).toLocaleString();
+}
 
-  if (wallet) {
-    return (
-      <div className="flex items-center gap-2">
-        <span
-          className="text-sm hidden sm:block"
-          style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}
-        >
-          {adaDisplay(wallet.lovelace)}
-        </span>
-        <button
-          onClick={disconnect}
-          className="inline-flex items-center justify-center rounded-lg text-xs transition-all"
+function unitToLabel(unit: string): { policyId: string; name: string } {
+  const policyId = unit.slice(0, 56);
+  const nameHex  = unit.slice(56);
+  let name = nameHex;
+  try {
+    if (nameHex) name = Buffer.from(nameHex, 'hex').toString('utf8');
+  } catch { /* keep hex */ }
+  return { policyId, name };
+}
+
+async function fetchWalletAssets(address: string): Promise<AssetRow[]> {
+  const res = await fetch(`/api/wallet-assets?address=${encodeURIComponent(address)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.assets ?? [];
+}
+
+function ConnectedWallet() {
+  const { wallet, disconnect } = useWallet();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close the dropdown on outside-click.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  // Asset list — refetched on connect, every 30s, and on window focus.
+  const { data: assets = [] } = useQuery({
+    queryKey: ['wallet-assets', wallet?.address],
+    queryFn:  () => fetchWalletAssets(wallet!.address),
+    enabled:  !!wallet?.address,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+
+  if (!wallet) return null;
+
+  return (
+    <div ref={ref} className="relative flex items-center gap-2">
+      <span
+        className="text-sm hidden sm:block"
+        style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}
+      >
+        {adaDisplay(wallet.lovelace)}
+      </span>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-lg text-xs transition-all"
+        style={{
+          height: 32,
+          padding: '0 12px',
+          background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-mid)',
+          color: 'var(--text)',
+          fontFamily: 'var(--font-jetbrains), monospace',
+          cursor: 'pointer',
+        }}
+      >
+        {truncate(wallet.address)}
+        {assets.length > 0 && (
+          <span
+            className="text-[10px] px-1.5 py-px rounded"
+            style={{
+              background: 'rgba(92,224,210,0.12)',
+              border: '1px solid rgba(92,224,210,0.3)',
+              color: 'var(--teal)',
+              fontFamily: 'var(--font-outfit), system-ui, sans-serif',
+            }}
+          >
+            {assets.length}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-2 w-80 rounded-lg overflow-hidden z-50"
+          role="menu"
           style={{
-            height: 32,
-            padding: '0 12px',
-            background: 'var(--bg-elevated)',
+            background: 'var(--bg-card)',
             border: '1px solid var(--border-mid)',
-            color: 'var(--text)',
-            fontFamily: 'var(--font-jetbrains), monospace',
-            cursor: 'pointer',
-          }}
-          onMouseEnter={e => {
-            (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-bright)';
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget as HTMLElement).style.borderColor = 'var(--border-mid)';
+            boxShadow: '0 12px 32px rgba(0,0,0,0.45)',
           }}
         >
-          {truncate(wallet.address)}
-        </button>
+          {/* Header — ADA balance + sm-only address */}
+          <div className="p-3 flex items-baseline justify-between" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
+                Balance
+              </span>
+              <span className="text-base font-semibold" style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+                {adaDisplay(wallet.lovelace)}
+              </span>
+            </div>
+            <span className="text-[10px]" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-outfit)' }}>
+              {wallet.name}
+            </span>
+          </div>
+
+          {/* Asset list */}
+          <div className="max-h-72 overflow-y-auto">
+            {assets.length === 0 ? (
+              <p className="text-xs text-center py-6" style={{ color: 'var(--text-dim)' }}>
+                No native tokens
+              </p>
+            ) : (
+              assets.map((a) => <AssetRowView key={a.unit} a={a} onNavigate={() => setOpen(false)} />)
+            )}
+          </div>
+
+          {/* Footer */}
+          <button
+            type="button"
+            onClick={() => { disconnect(); setOpen(false); }}
+            className="w-full text-xs py-2.5"
+            style={{
+              background: 'var(--bg-elevated)',
+              borderTop: '1px solid var(--border-subtle)',
+              color: 'var(--text-dim)',
+              fontFamily: 'var(--font-outfit), system-ui, sans-serif',
+              cursor: 'pointer',
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssetRowView({ a, onNavigate }: { a: AssetRow; onNavigate: () => void }) {
+  const fallback = unitToLabel(a.unit);
+  const display = a.registry
+    ? { ticker: a.registry.ticker, name: a.registry.name, imageUri: a.registry.imageUri }
+    : { ticker: fallback.name || 'unknown', name: fallback.policyId.slice(0, 10) + '…', imageUri: undefined };
+
+  const inner = (
+    <div
+      className="flex items-center gap-3 px-3 py-2 transition-colors hover:bg-[var(--bg-elevated)]"
+    >
+      <div
+        className="relative shrink-0 overflow-hidden rounded-md"
+        style={{ width: 28, height: 28, background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
+      >
+        {display.imageUri ? (
+          <Image src={display.imageUri.replace('ipfs://', 'https://ipfs.io/ipfs/')} alt={display.name} fill className="object-cover" unoptimized />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs font-bold" style={{ color: 'var(--teal)', fontFamily: 'var(--font-outfit)' }}>
+            {(display.ticker || '?')[0]}
+          </div>
+        )}
       </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-semibold truncate" style={{ color: 'var(--text)', fontFamily: 'var(--font-outfit)' }}>
+          {display.ticker}
+        </p>
+        <p className="text-[10px] truncate" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+          {display.name}
+        </p>
+      </div>
+      <span
+        className="text-xs tabular-nums shrink-0"
+        style={{ color: 'var(--text)', fontFamily: 'var(--font-jetbrains), monospace' }}
+      >
+        {fmtQty(a.quantity)}
+      </span>
+    </div>
+  );
+
+  if (a.registry) {
+    return (
+      <Link
+        href={`/token/${a.registry.policyId}?asset=${a.registry.assetName}`}
+        onClick={onNavigate}
+        style={{ display: 'block', color: 'inherit', textDecoration: 'none' }}
+      >
+        {inner}
+      </Link>
     );
   }
+  return inner;
+}
+
+export function WalletButton() {
+  const { wallet, connecting, availableWallets, connect } = useWallet();
+  const [open, setOpen] = useState(false);
+
+  if (wallet) return <ConnectedWallet />;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { BondingProgress } from './bonding-progress';
+import { SocialLinks } from '@/lib/social-links';
 import type { TokenInfo } from '@/lib/types';
 
 function mcap(ada: number): string {
@@ -103,6 +104,17 @@ export function TokenCard({ token }: { token: TokenInfo }) {
           {(Number(token.priceLovelace) / 1_000_000).toFixed(6)} ₳
         </span>
       </div>
+
+      {/* Social icons (button-flavoured so they don't nest <a> in the wrapping Link) */}
+      <SocialLinks
+        nested
+        size={11}
+        cell={22}
+        website={token.website}
+        twitter={token.twitter}
+        telegram={token.telegram}
+        discord={token.discord}
+      />
     </Link>
   );
 }

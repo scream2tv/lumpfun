@@ -54,12 +54,15 @@ function Field({
 
 function TextInput({
   hasError,
+  style: styleOverride,
   ...props
 }: React.InputHTMLAttributes<HTMLInputElement> & { hasError?: boolean }) {
   return (
     <input
       {...props}
-      style={{ ...inputBase, borderColor: hasError ? 'var(--lava-bright)' : 'var(--border-subtle)' }}
+      // Merge caller's style on top of the base so per-field overrides like
+      // paddingLeft (used by the ticker `$` prefix) actually take effect.
+      style={{ ...inputBase, ...styleOverride, borderColor: hasError ? 'var(--lava-bright)' : 'var(--border-subtle)' }}
       onFocus={e => {
         e.currentTarget.style.borderColor = hasError ? 'var(--lava-bright)' : 'var(--teal)';
         e.currentTarget.style.boxShadow = hasError
