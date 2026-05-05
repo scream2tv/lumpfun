@@ -50,13 +50,18 @@ export async function POST(req: Request) {
   const blockfrostJs = await import('@blockfrost/blockfrost-js');
   const networkId    = network === 'Mainnet' ? sdk.NetworkId.MAINNET : sdk.NetworkId.TESTNET;
 
+  // Bootstrap the SDK's legacy Lucid with the configured treasury address —
+  // selectWalletFromSeed below overrides it, but the bootstrap still validates
+  // bech32 and rejects malformed/wrong-network addresses up front.
+  const bootstrapAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
+  if (!bootstrapAddress) {
+    return NextResponse.json({ error: 'NEXT_PUBLIC_TREASURY_ADDRESS not set' }, { status: 500 });
+  }
   const tmpLucid = await sdk.getBackendBlockfrostLucidInstance(
     networkId,
     projectId,
     baseUrl,
-    network === 'Mainnet'
-      ? 'addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp'
-      : 'addr_test1qpu5vlrf4xkxv2qpwngf6cjhtw542ayty80v8dyr49rf5ewvxwdrt70qlcpeeagscasafhffqsxy36t90ldv06wqrk2qum8x5w',
+    bootstrapAddress,
   );
   tmpLucid.selectWalletFromSeed(seedPhrase);
   const treasuryAddr = await tmpLucid.wallet.address();

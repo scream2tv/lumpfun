@@ -127,17 +127,19 @@ async function createPool(
 
   const networkId = network === 'Mainnet' ? sdk.NetworkId.MAINNET : sdk.NetworkId.TESTNET;
 
-  // Get a temp address to bootstrap the SDK's legacy Lucid (it then accepts
-  // the seed-derived wallet, which overrides the readonly address).
+  // Bootstrap the SDK's legacy Lucid with a known-valid bech32 — required
+  // even though selectWalletFromSeed below overrides the wallet address.
+  // We pass the configured treasury address so the bootstrap can never fail
+  // its bech32 validation regardless of network.
+  const bootstrapAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
+  if (!bootstrapAddress) {
+    throw new Error('NEXT_PUBLIC_TREASURY_ADDRESS not set — required to bootstrap the Minswap SDK Lucid instance');
+  }
   const tmpLucid = await sdk.getBackendBlockfrostLucidInstance(
     networkId,
     projectId,
     baseUrl,
-    // Placeholder address — `selectWalletFromSeed` overrides it. Use a known
-    // burn address so the bootstrap doesn't fail name resolution.
-    network === 'Mainnet'
-      ? 'addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp'
-      : 'addr_test1qpu5vlrf4xkxv2qpwngf6cjhtw542ayty80v8dyr49rf5ewvxwdrt70qlcpeeagscasafhffqsxy36t90ldv06wqrk2qum8x5w',
+    bootstrapAddress,
   );
   // Legacy Lucid API: selectWalletFromSeed (camelCase, no `.wallet` namespace)
   tmpLucid.selectWalletFromSeed(seedPhrase);
