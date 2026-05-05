@@ -38,9 +38,36 @@ export async function POST(req: NextRequest) {
     'png';
 
   const name = `${crypto.randomBytes(12).toString('hex')}.${ext}`;
-  const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
-  await mkdir(uploadsDir, { recursive: true });
-  await writeFile(path.join(uploadsDir, name), buf);
 
-  return NextResponse.json({ url: `/uploads/${name}` });
+  // Vercel: serverless filesystem is read-only outside /tmp, so when the Blob
+  // store env var is present (auto-injected after you create a store in
+  // project Settings → Storage → Blob), upload there instead of the local FS.
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    try {
+      const { put } = await import('@vercel/blob');
+      const blob = await put(`uploads/${name}`, buf, {
+        access:      'public',
+        contentType: mime || `image/${ext}`,
+      });
+      return NextResponse.json({ url: blob.url });
+    } catch (e) {
+      return NextResponse.json(
+        { error: `Vercel Blob upload failed: ${e instanceof Error ? e.message : String(e)}` },
+        { status: 500 },
+      );
+    }
+  }
+
+  // Local dev fallback — write to web/public/uploads.
+  try {
+    const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
+    await mkdir(uploadsDir, { recursive: true });
+    await writeFile(path.join(uploadsDir, name), buf);
+    return NextResponse.json({ url: `/uploads/${name}` });
+  } catch (e) {
+    return NextResponse.json(
+      { error: `Local upload failed: ${e instanceof Error ? e.message : String(e)}` },
+      { status: 500 },
+    );
+  }
 }

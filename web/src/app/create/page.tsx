@@ -435,7 +435,7 @@ export default function CreatePage() {
                   hasError={!!tickerError}
                   onChange={e => { const v = e.target.value; setTicker(v); if (tickerError) validateTicker(v); }}
                   onBlur={e => validateTicker(e.target.value)}
-                  style={{ ...inputBase, paddingLeft: 40, paddingRight: 40, fontFamily: 'var(--font-jetbrains), monospace', letterSpacing: '0.05em', borderColor: tickerError ? 'var(--lava-bright)' : 'var(--border-subtle)' }}
+                  style={{ ...inputBase, paddingLeft: 44, paddingRight: 40, fontFamily: 'var(--font-jetbrains), monospace', letterSpacing: '0.05em', borderColor: tickerError ? 'var(--lava-bright)' : 'var(--border-subtle)' }}
                 />
                 <span
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"
