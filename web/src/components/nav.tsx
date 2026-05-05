@@ -48,7 +48,7 @@ export function Nav() {
 
           {/* Desktop nav links */}
           <nav className="hidden sm:flex items-center gap-1 flex-1">
-            <NavLink href="/">Tokens</NavLink>
+            <NavLink href="/feed">Tokens</NavLink>
             <NavLink href="/create">Launch</NavLink>
           </nav>
 
@@ -82,7 +82,7 @@ export function Nav() {
             boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
           }}
         >
-          <MobileLink href="/" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
+          <MobileLink href="/feed" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
           <MobileLink href="/create" onClick={() => setMenuOpen(false)}>+ Launch Token</MobileLink>
         </div>
       )}

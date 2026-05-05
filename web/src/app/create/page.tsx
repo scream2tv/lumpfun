@@ -376,7 +376,7 @@ export default function CreatePage() {
             View token →
           </button>
           <button
-            onClick={() => router.push('/')}
+            onClick={() => router.push('/feed')}
             className="inline-flex items-center justify-center rounded-xl text-sm font-semibold"
             style={{ height: 40, padding: '0 20px', background: 'var(--bg-elevated)', color: 'var(--text)', border: '1px solid var(--border-mid)', fontFamily: 'var(--font-outfit)' }}
           >
