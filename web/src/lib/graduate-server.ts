@@ -12,8 +12,6 @@
 //   - GET  /api/graduate/tick                       (cron / manual scan)
 
 import 'server-only';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import {
   Lucid as LucidEv,
   Blockfrost as BlockfrostEv,
@@ -24,8 +22,7 @@ import {
 } from '@lucid-evolution/lucid';
 import type { TokenMeta } from './types';
 import { computeGraduationQuote, type CurveStateBig } from './graduate-math';
-
-const REGISTRY_PATH = join(process.cwd(), '..', 'cardano-registry.json');
+import { getAllTokens, patchToken } from './registry';
 
 // In-flight set: prevents two concurrent triggers from kicking off the same
 // graduation twice (which would produce a double-spend conflict on Tx 1).
@@ -45,31 +42,9 @@ function env() {
   return { network, projectId, seedPhrase, baseUrl };
 }
 
-// ── Registry helpers (atomic via promise queue) ─────────────────────────────
-
-let registryQueue: Promise<void> = Promise.resolve();
-
-async function readRegistry(): Promise<TokenMeta[]> {
-  try {
-    const raw = await readFile(REGISTRY_PATH, 'utf8');
-    return JSON.parse(raw) as TokenMeta[];
-  } catch { return []; }
-}
-
-async function patchRegistry(policyId: string, patch: Partial<TokenMeta>): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    registryQueue = registryQueue.then(async () => {
-      try {
-        const list = await readRegistry();
-        const idx  = list.findIndex(t => t.policyId === policyId);
-        if (idx < 0) { resolve(); return; }
-        list[idx] = { ...list[idx], ...patch };
-        await writeFile(REGISTRY_PATH, JSON.stringify(list, null, 2));
-        resolve();
-      } catch (err) { reject(err); }
-    });
-  });
-}
+// Backed by KV in production, local file in dev. Same shape as the old
+// promise-queued helpers.
+const patchRegistry = patchToken;
 
 // ── Datum / redeemer codecs (must match cardano-tx.ts and Aiken validator) ──
 
@@ -265,7 +240,7 @@ export async function runGraduation(meta: TokenMeta): Promise<{
 import { isGraduated } from './curve-math';
 
 export async function findPendingGraduations(): Promise<TokenMeta[]> {
-  const all = await readRegistry();
+  const all = await getAllTokens();
   return all.filter(t => !t.graduatedTxHash || !t.minswapPoolTxHash);
 }
 

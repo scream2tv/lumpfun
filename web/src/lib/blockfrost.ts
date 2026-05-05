@@ -72,15 +72,13 @@ export async function fetchAssetMeta(policyId: string, assetNameHex: string) {
 }
 
 // ── Token list from registry ──────────────────────────────────────────────────
-// Read the file directly on the server to avoid HTTP round-trip caching issues.
+// Pulled from KV (production) or the local JSON file (dev) via the registry
+// module — avoids the HTTP round-trip caching the API route would impose.
 
 export async function fetchTokenList(): Promise<TokenMeta[]> {
   try {
-    const { readFile } = await import('node:fs/promises');
-    const { join }     = await import('node:path');
-    const registryPath = join(process.cwd(), '..', 'cardano-registry.json');
-    const raw = await readFile(registryPath, 'utf8');
-    return JSON.parse(raw) as TokenMeta[];
+    const { getAllTokens } = await import('./registry');
+    return await getAllTokens();
   } catch {
     return [];
   }

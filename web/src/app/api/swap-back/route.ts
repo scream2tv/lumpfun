@@ -12,11 +12,7 @@
 
 import 'server-only';
 import { NextResponse } from 'next/server';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { TokenMeta } from '@/lib/types';
-
-const REGISTRY_PATH = join(process.cwd(), '..', 'cardano-registry.json');
+import { getTokenByPolicyId } from '@/lib/registry';
 
 const SLIPPAGE_BPS = 500n; // 5%
 
@@ -42,15 +38,7 @@ export async function POST(req: Request) {
   if (!seedPhrase) return NextResponse.json({ error: 'TREASURY_SEED not set' },          { status: 500 });
 
   // Registry lookup
-  let registry: TokenMeta[];
-  try {
-    const raw = await readFile(REGISTRY_PATH, 'utf8');
-    registry = JSON.parse(raw) as TokenMeta[];
-  } catch (e) {
-    return NextResponse.json({ error: `registry read failed: ${(e as Error).message}` }, { status: 500 });
-  }
-
-  const meta = registry.find(t => t.policyId === body.policyId);
+  const meta = await getTokenByPolicyId(body.policyId);
   if (!meta) return NextResponse.json({ error: `policyId ${body.policyId} not in registry` }, { status: 404 });
   if (!meta.minswapPoolTxHash) return NextResponse.json({ error: 'token has not graduated to Minswap' }, { status: 400 });
 

@@ -1,19 +1,7 @@
 import { NextResponse } from 'next/server';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { TokenMeta } from '@/lib/types';
+import { getTokenByPolicyId } from '@/lib/registry';
 
 export const dynamic = 'force-dynamic';
-
-const REGISTRY_PATH = join(process.cwd(), '..', 'cardano-registry.json');
-
-async function findToken(policyId: string): Promise<TokenMeta | null> {
-  try {
-    const raw = await readFile(REGISTRY_PATH, 'utf8');
-    const list = JSON.parse(raw) as TokenMeta[];
-    return list.find(t => t.policyId === policyId) ?? null;
-  } catch { return null; }
-}
 
 export async function POST(req: Request) {
   let policyId: string;
@@ -27,7 +15,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'policyId required' }, { status: 400 });
   }
 
-  const meta = await findToken(policyId);
+  const meta = await getTokenByPolicyId(policyId);
   if (!meta) {
     return NextResponse.json({ error: 'token not found in registry' }, { status: 404 });
   }
