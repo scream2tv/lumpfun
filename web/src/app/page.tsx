@@ -56,8 +56,7 @@ export default function LandingPage() {
           fontSize: 16,
         }}
       >
-        Fair-launch tokens on Cardano. Bonding curve to Minswap, the moment
-        you graduate.
+        Earn 1% Creator Fees on Every Trade
       </p>
 
       {/* Audience selector */}
