@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server';
 import { fetchCurveState } from '@/lib/blockfrost';
 import { getTokenByCurveAddressAndAsset } from '@/lib/registry';
 
+// The fire-and-forget runGraduation call below can take up to ~120s for the
+// drain + pool pair. Allow the function to stay alive long enough for that
+// background work to complete on Vercel Pro (5-minute max).
+export const maxDuration = 300;
+
 // Fire-and-forget: when a curve poll detects a graduated state, kick off the
 // server-side migration. Idempotent and rate-limited inside graduate-server.
 async function maybeTriggerGraduation(address: string, asset: string) {

@@ -3,6 +3,9 @@ import { fetchCurveState } from '@/lib/blockfrost';
 import { isGraduated } from '@/lib/curve-math';
 
 export const dynamic = 'force-dynamic';
+// One tick may run the full drain + pool pair for one or more pending tokens.
+// Allow up to the Vercel Pro 5-minute max so it doesn't get killed mid-tx.
+export const maxDuration = 300;
 
 // Cron-style scanner: walk every registry entry that hasn't fully graduated,
 // check on-chain state, and trigger migration where applicable. Designed to be

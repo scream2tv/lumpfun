@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { getTokenByPolicyId } from '@/lib/registry';
 
 export const dynamic = 'force-dynamic';
+// Drain + Minswap pool tx pair takes ~60–120s on mainnet; allow up to 5 min
+// (Vercel Pro max) so a single call can finish both steps atomically.
+export const maxDuration = 300;
 
 export async function POST(req: Request) {
   let policyId: string;
