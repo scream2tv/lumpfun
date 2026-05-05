@@ -22,6 +22,11 @@ export interface TokenMeta {
   // Set after Tx 1 (drain curve to treasury via Graduate redeemer).
   graduatedTxHash?: string;
   graduatedAt?: string; // ISO
+  // Pre-drain curve reserves, captured at drain time so a later resumed
+  // pool-creation tx can recompute the Minswap quote without re-reading the
+  // (now-spent) curve UTxO. Strings for JSON-safe bigint storage.
+  preDrainAdaReserve?: string;
+  preDrainTokenReserve?: string;
   // Set after Tx 2 (Minswap V2 pool creation from treasury wallet).
   minswapPoolTxHash?: string;
   minswapPoolId?: string;

@@ -46,6 +46,52 @@ function env() {
 // promise-queued helpers.
 const patchRegistry = patchToken;
 
+// ── Drain-tx recovery ───────────────────────────────────────────────────────
+// drainCurve emits exactly one output to treasury with all the curve's
+// lovelace + tokens, so we can reconstruct the pre-drain state by reading
+// that output's value. Used to recover migrations stuck after a drain that
+// pre-dates persistent reserves capture.
+async function reconstructStateFromDrainTx(
+  drainTxHash: string,
+  meta: TokenMeta,
+): Promise<CurveStateBig | null> {
+  const { projectId, baseUrl } = env();
+  const treasuryAddr = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
+  if (!treasuryAddr) return null;
+
+  try {
+    const res = await fetch(`${baseUrl}/txs/${drainTxHash}/utxos`, {
+      headers: { project_id: projectId },
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const data: {
+      outputs: Array<{
+        address: string;
+        amount: Array<{ unit: string; quantity: string }>;
+      }>;
+    } = await res.json();
+
+    const assetUnit = `${meta.policyId}${meta.assetName}`;
+    const out = data.outputs.find(o =>
+      o.address === treasuryAddr &&
+      o.amount.some(a => a.unit === assetUnit),
+    );
+    if (!out) return null;
+
+    const lovelace = out.amount.find(a => a.unit === 'lovelace')?.quantity;
+    const tokens   = out.amount.find(a => a.unit === assetUnit)?.quantity;
+    if (!lovelace || !tokens) return null;
+
+    return {
+      adaReserve:   BigInt(lovelace),
+      tokenReserve: BigInt(tokens),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Datum / redeemer codecs (must match cardano-tx.ts and Aiken validator) ──
 
 function decodeCurveDatum(hex: string): CurveStateBig {
@@ -197,23 +243,42 @@ export async function runGraduation(meta: TokenMeta): Promise<{
       drainTxHash = r.txHash;
       state       = r.state;
       await patchRegistry(meta.policyId, {
-        graduatedTxHash: drainTxHash,
-        graduatedAt:     new Date().toISOString(),
+        graduatedTxHash:      drainTxHash,
+        graduatedAt:          new Date().toISOString(),
+        preDrainAdaReserve:   r.state.adaReserve.toString(),
+        preDrainTokenReserve: r.state.tokenReserve.toString(),
       });
     }
 
-    // Step 2 — pool. We need the curve state for the quote; if we just drained
-    // we already have it; otherwise re-derive from the original on-chain datum
-    // (which we no longer have access to). For now require state to be known.
+    // Step 2 — pool. We need the curve state for the quote.
     if (!meta.minswapPoolTxHash) {
+      // Resume path A: registry already captured the reserves.
+      if (!state && meta.preDrainAdaReserve && meta.preDrainTokenReserve) {
+        state = {
+          adaReserve:   BigInt(meta.preDrainAdaReserve),
+          tokenReserve: BigInt(meta.preDrainTokenReserve),
+        };
+      }
+      // Resume path B: registry didn't capture reserves (older drain). Read
+      // the drain tx's outputs from Blockfrost — drainCurve pays ALL the
+      // curve's lovelace and tokens to treasury in a single explicit output,
+      // so that output's value equals the pre-drain reserves.
+      if (!state && drainTxHash) {
+        const recovered = await reconstructStateFromDrainTx(drainTxHash, meta);
+        if (recovered) {
+          state = recovered;
+          // Persist for any future re-runs.
+          await patchRegistry(meta.policyId, {
+            preDrainAdaReserve:   recovered.adaReserve.toString(),
+            preDrainTokenReserve: recovered.tokenReserve.toString(),
+          });
+        }
+      }
       if (!state) {
-        // Without state we can't compute the pool quote precisely. Best we can
-        // do is resume from a partial state if the registry still has the last
-        // known reserves. Skip silently and let manual recovery handle it.
         return {
           status:      'drained',
           drainTxHash,
-          error:       'Drained but pool quote requires curve state — re-run while state is known.',
+          error:       'Drained but cannot reconstruct pre-drain reserves from drain tx — Blockfrost lookup failed.',
         };
       }
       const p = await createPool(meta, state);
