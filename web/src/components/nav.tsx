@@ -33,17 +33,26 @@ export function Nav() {
         }}
       >
         <div className="max-w-7xl mx-auto flex h-14 items-center justify-between px-4 gap-3">
-          {/* Logo */}
+          {/* Logo — `fun` runs the same teal→lava rift gradient as the landing wordmark. */}
           <Link
             href="/"
             className="flex items-center font-bold text-lg tracking-tight shrink-0"
-            style={{
-              color: 'var(--teal)',
-              textShadow: '0 0 20px rgba(92, 224, 210, 0.5)',
-              fontFamily: 'var(--font-outfit), system-ui, sans-serif',
-            }}
+            style={{ fontFamily: 'var(--font-outfit), system-ui, sans-serif' }}
           >
-            lump<span style={{ color: 'var(--text-dim)', textShadow: 'none' }}>.</span>fun
+            <span style={{ color: 'var(--teal)', textShadow: '0 0 20px rgba(92, 224, 210, 0.5)' }}>
+              lump
+            </span>
+            <span
+              style={{
+                background: 'linear-gradient(135deg, #5ce0d2 0%, #5ce0d2 35%, #ff6b35 70%, #e85a2a 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                backgroundClip: 'text',
+                filter: 'drop-shadow(0 0 8px rgba(232,90,42,0.25))',
+              }}
+            >
+              fun
+            </span>
           </Link>
 
           {/* Desktop nav links */}
