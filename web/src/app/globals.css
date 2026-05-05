@@ -1,0 +1,180 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── screams.tv design tokens ───────────────────────────────────────────────── */
+:root {
+  /* Backgrounds — warm volcanic blacks */
+  --bg-deep:     #0a0908;
+  --bg-base:     #0f0d0b;
+  --bg-surface:  #151311;
+  --bg-card:     #1a1816;
+  --bg-elevated: #211f1c;
+  --bg-hover:    #2a2724;
+
+  /* Glass */
+  --glass-bg:     rgba(21, 19, 17, 0.72);
+  --glass-border: rgba(92, 224, 210, 0.06);
+  --glass-blur:   16px;
+
+  /* Borders */
+  --border-subtle: rgba(92, 224, 210, 0.07);
+  --border-mid:    rgba(92, 224, 210, 0.16);
+  --border-bright: rgba(92, 224, 210, 0.35);
+
+  /* Primary — icy teal */
+  --teal:        #5ce0d2;
+  --teal-dim:    #4abfb3;
+  --teal-hot:    #7ff5e6;
+  --teal-muted:  rgba(92, 224, 210, 0.12);
+  --teal-glow:   rgba(92, 224, 210, 0.4);
+
+  /* Secondary — molten lava (sell / destructive) */
+  --lava:        #e85a2a;
+  --lava-bright: #ff6b35;
+  --lava-muted:  rgba(232, 90, 42, 0.12);
+  --lava-glow:   rgba(232, 90, 42, 0.5);
+
+  /* Accent — warm amber (graduation) */
+  --amber:       #d4922a;
+  --amber-bright:#e8a83a;
+
+  /* Text */
+  --text:        #e8e4df;
+  --text-bright: #f5f2ee;
+  --text-dim:    #7a756e;
+
+  /* Glows */
+  --glow-teal:    0 0 20px rgba(92, 224, 210, 0.15);
+  --glow-teal-lg: 0 0 40px rgba(92, 224, 210, 0.12);
+  --glow-lava:    0 0 20px rgba(232, 90, 42, 0.2);
+  --glow-lava-lg: 0 0 40px rgba(232, 90, 42, 0.25), 0 0 80px rgba(232, 90, 42, 0.1);
+
+  /* Shadows */
+  --shadow-sm:  0 2px 8px rgba(0,0,0,0.2);
+  --shadow-md:  0 4px 16px rgba(0,0,0,0.25), 0 2px 4px rgba(0,0,0,0.1);
+  --shadow-lg:  0 8px 32px rgba(0,0,0,0.35), 0 4px 8px rgba(0,0,0,0.15);
+
+  /* Easing */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out:   cubic-bezier(0.4, 0, 0.2, 1);
+  --transition:    200ms var(--ease-in-out);
+  --transition-md: 300ms var(--ease-out-expo);
+
+  /* Radius */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r:    12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+
+  /* ── shadcn / Tailwind token mapping ── */
+  --background: var(--bg-base);
+  --foreground:  var(--text);
+  --card:        var(--bg-card);
+  --card-foreground: var(--text);
+  --popover:     var(--bg-elevated);
+  --popover-foreground: var(--text);
+  --primary:     var(--teal);
+  --primary-foreground: var(--bg-deep);
+  --secondary:   var(--bg-elevated);
+  --secondary-foreground: var(--text);
+  --muted:       var(--bg-surface);
+  --muted-foreground: var(--text-dim);
+  --accent:      var(--teal-muted);
+  --accent-foreground: var(--teal);
+  --destructive: var(--lava);
+  --destructive-foreground: #fff;
+  --border:      var(--border-subtle);
+  --input:       var(--bg-surface);
+  --ring:        var(--teal);
+  --radius:      12px;
+}
+
+@theme inline {
+  --color-background: var(--bg-base);
+  --color-foreground:  var(--text);
+  --color-card:        var(--bg-card);
+  --color-card-foreground: var(--text);
+  --color-popover:     var(--bg-elevated);
+  --color-popover-foreground: var(--text);
+  --color-primary:     var(--teal);
+  --color-primary-foreground: var(--bg-deep);
+  --color-secondary:   var(--bg-elevated);
+  --color-secondary-foreground: var(--text);
+  --color-muted:       var(--bg-surface);
+  --color-muted-foreground: var(--text-dim);
+  --color-accent:      var(--teal-muted);
+  --color-accent-foreground: var(--teal);
+  --color-destructive: var(--lava);
+  --color-destructive-foreground: #fff;
+  --color-border:      var(--border-subtle);
+  --color-input:       var(--bg-surface);
+  --color-ring:        var(--teal);
+  --radius-sm:   var(--r-sm);
+  --radius-md:   var(--r);
+  --radius-lg:   var(--r-lg);
+  --font-sans:   var(--font-outfit), system-ui, sans-serif;
+  --font-mono:   var(--font-jetbrains), 'Fira Code', monospace;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; border-color: var(--border-subtle); }
+
+html { color-scheme: dark; }
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text);
+  font-family: var(--font-outfit), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(92, 224, 210, 0.3); }
+
+/* ── Card hover effect (stream-card pattern) ────────────────────────────────── */
+.lf-card {
+  position: relative;
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(26, 24, 22, 0.8) 100%);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  transition: all var(--transition-md);
+}
+.lf-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(92, 224, 210, 0.2), transparent);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.lf-card:hover {
+  border-color: var(--border-mid);
+  box-shadow: var(--glow-teal), var(--shadow-md);
+  transform: translateY(-3px) scale(1.005);
+}
+.lf-card:hover::before { opacity: 1; }
+
+/* ── Teal glow input focus ──────────────────────────────────────────────────── */
+input:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--teal) !important;
+  box-shadow: 0 0 0 2px rgba(92, 224, 210, 0.1) !important;
+}
+
+/* ── Progress bar fill ──────────────────────────────────────────────────────── */
+[data-slot="progress-indicator"] {
+  background: linear-gradient(90deg, var(--teal-dim), var(--teal)) !important;
+  box-shadow: 0 0 8px rgba(92, 224, 210, 0.4);
+}
+
+/* ── Selection ──────────────────────────────────────────────────────────────── */
+::selection { background: rgba(92, 224, 210, 0.2); color: var(--text-bright); }

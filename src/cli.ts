@@ -21,6 +21,7 @@ import {
 } from './launch.js';
 import { listLaunches, recordLaunch } from './registry.js';
 import { getChainInfo, getTxByHash, rpcHealth } from './chain.js';
+import { registerCardanoCommands } from './cardano/cli.js';
 
 /** JSON.stringify replacer: renders bigints as decimal strings. */
 function bi(_k: string, v: unknown): unknown {
@@ -408,6 +409,8 @@ chain
   .action(async () => {
     console.log(JSON.stringify(await getChainInfo(), null, 2));
   });
+
+registerCardanoCommands(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(err?.message ?? err);
