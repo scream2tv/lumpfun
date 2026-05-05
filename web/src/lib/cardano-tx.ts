@@ -27,6 +27,12 @@ const BONDING_CURVE_CBOR =
 const MINTING_POLICY_CBOR =
   '5887010100229800aba2aba1aab9faab9eaab9dab9a48888896600264646644b30013370e900018031baa00189991198008009bac300b30093754601600c6eb8c024c01cdd5000912cc00400629422b30013375e601660126ea8c02c00403a29462660040046018002803900a459005180380098039804000980380098019baa0078a4d13656400401';
 
+// Vesting timelock validator (PlutusV3). Parameterised at deploy time with
+// (creator_pkh, unlock_posix_ms). Spend rule: tx must be signed by
+// creator_pkh AND tx.validity_range.lower_bound >= unlock_posix_ms.
+const VESTING_CBOR =
+  '58ed0101002229800aba2aba1aab9faab9eaab9dab9a9bae0039bad0024888888896600264653001300900198049805000cc0240092225980099b8748008c024dd500144c8cc896600264660020026eb0c040c044c044c044c044c044c044c044c044c038dd5002912cc00400629422b30013371e6eb8c04400403229462660040046024002806901044c96600266e1d2002300d37540031337120146eb4c040c038dd5000c5282018300f300d3754601e601a6ea8c03cc040c040c040c040c040c040c040c034dd500245282016300d001300d300e001300a3754005164020300900130053754013149a26cac8019';
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const TOTAL_SUPPLY        = 1_000_000_000n;
@@ -112,6 +118,27 @@ export function deriveContracts(
   return { mintingPolicy, bondingCurve, policyId, assetName, curveAddress };
 }
 
+// ── Vesting ───────────────────────────────────────────────────────────────────
+// Apply (creator_pkh, unlock_posix_ms) to the unparameterised vesting CBOR
+// and return the per-launch script + script address. Dev allocation tokens
+// can be locked at this address until unlock_posix_ms; the creator's claim
+// tx must signed by creator and have a validity range starting at/after the
+// unlock time.
+
+export function deriveVestingContract(
+  creatorPkh: string,
+  unlockPosixMs: bigint,
+  network: 'Mainnet' | 'Preprod',
+): { vestingValidator: { type: 'PlutusV3'; script: string }; vestingAddress: string } {
+  const script = applyParamsToScript(
+    applyDoubleCborEncoding(VESTING_CBOR),
+    [creatorPkh, unlockPosixMs],
+  );
+  const vestingValidator = { type: 'PlutusV3' as const, script };
+  const vestingAddress = validatorToAddress(network, vestingValidator);
+  return { vestingValidator, vestingAddress };
+}
+
 // ── Launch ────────────────────────────────────────────────────────────────────
 
 export interface LaunchFormData {
@@ -124,6 +151,10 @@ export interface LaunchFormData {
    *  if set, else 21_000_000_000 (21,000 ADA). Lower values let you test the
    *  full launch → graduate → Minswap flow with very little ADA. */
   graduationAdaLovelace?: bigint;
+  /** If set (and devAllocBps > 0), the dev allocation is locked at a vesting
+   *  script address until this POSIX milliseconds value, claimable only by
+   *  the creator. 0/undefined = legacy instant-mint behaviour. */
+  vestingUnlockMs?: number;
   imageUri?: string;
   description?: string;
 }
@@ -139,6 +170,10 @@ export interface LaunchResult {
   assetName: string;
   curveAddress: string;
   validatorCbor: string;
+  /** Set when vestingUnlockMs was provided AND devAllocBps > 0. */
+  vestingAddress?: string;
+  vestingValidatorCbor?: string;
+  vestingUnlockMs?: number;
 }
 
 export async function launchToken(
@@ -211,9 +246,27 @@ export async function launchToken(
     )
     .pay.ToAddress(treasuryAddress, { lovelace: PLATFORM_FEE });
 
-  if (devTokens > 0n) {
+  // Vesting: if a future unlock time was supplied AND there's a non-zero dev
+  // allocation, route the dev tokens to a vesting script address parameterised
+  // with the creator's pkh + unlock_posix_ms. The creator can later claim the
+  // tokens with a tx that's signed by them and validFrom >= unlock_posix_ms.
+  let vestingAddress:        string | undefined;
+  let vestingValidatorCbor:  string | undefined;
+  let vestingUnlockMs:       number | undefined;
+  if (devTokens > 0n && params.vestingUnlockMs && params.vestingUnlockMs > Date.now()) {
+    const vesting = deriveVestingContract(creatorPkh, BigInt(params.vestingUnlockMs), network);
+    vestingAddress       = vesting.vestingAddress;
+    vestingValidatorCbor = vesting.vestingValidator.script;
+    vestingUnlockMs      = params.vestingUnlockMs;
+    tx.pay.ToAddressWithData(
+      vestingAddress,
+      { kind: 'inline', value: Data.void() },
+      { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: devTokens },
+    );
+  } else if (devTokens > 0n) {
     tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: devTokens });
   }
+
   if (tokensToCreator > 0n) {
     tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensToCreator });
   }
@@ -221,7 +274,71 @@ export async function launchToken(
   const signed  = await tx.complete().then(t => t.sign.withWallet().complete());
   const txHash  = await signed.submit();
 
-  return { txHash, policyId, assetName, curveAddress, validatorCbor: bondingCurve.script };
+  return {
+    txHash, policyId, assetName, curveAddress,
+    validatorCbor: bondingCurve.script,
+    vestingAddress, vestingValidatorCbor, vestingUnlockMs,
+  };
+}
+
+// ── Vesting claim ─────────────────────────────────────────────────────────────
+// Spend the vested UTxO back to the creator's wallet. The validator requires:
+//   1. tx is signed by creator
+//   2. tx.validity_range.lower_bound (validFrom) >= unlock_posix_ms
+
+export async function claimVestedTokens(
+  walletApi: Cip30Api,
+  vestingAddress: string,
+  vestingValidatorCbor: string,
+  unlockMs: number,
+  policyId: string,
+  assetName: string,
+): Promise<{ txHash: string; tokens: bigint; lovelace: bigint }> {
+  const lucid = await getLucid(walletApi);
+  const assetUnit = `${policyId}${assetName}`;
+
+  const utxos = await lucid.utxosAt(vestingAddress);
+  // Filter to UTxOs that actually carry the asset (defensive against junk).
+  const vestingUtxos = utxos.filter(u => (u.assets[assetUnit] ?? 0n) > 0n);
+  if (vestingUtxos.length === 0) throw new Error('No vested UTxO at the vesting address');
+
+  // Lucid Evolution requires explicit shape for inline-datum UTxOs.
+  const inputs: UTxO[] = vestingUtxos.map(u => ({
+    txHash:      u.txHash,
+    outputIndex: u.outputIndex,
+    assets:      { ...u.assets },
+    address:     vestingAddress,
+    datum:       u.datum,
+    datumHash:   undefined,
+    scriptRef:   undefined,
+  }));
+
+  const totalLovelace = inputs.reduce((s, u) => s + u.assets.lovelace, 0n);
+  const totalTokens   = inputs.reduce((s, u) => s + (u.assets[assetUnit] ?? 0n), 0n);
+
+  const walletAddr = await lucid.wallet().address();
+  const creatorPkh = getAddressDetails(walletAddr).paymentCredential?.hash;
+  if (!creatorPkh) throw new Error('Cannot resolve creator pkh');
+
+  // Validity-range buffer: set validFrom to the larger of (unlockMs + 1s) and
+  // (now + a few seconds) so the slot conversion always lands strictly after
+  // the unlock without trying to use a slot in the past.
+  const validFrom = Math.max(unlockMs + 1_000, Date.now() + 5_000);
+  const validTo   = validFrom + 60 * 60 * 1_000; // 1h window
+
+  const signed = await lucid
+    .newTx()
+    .collectFrom(inputs, Data.void())
+    .attach.SpendingValidator({ type: 'PlutusV3' as const, script: vestingValidatorCbor })
+    .addSignerKey(creatorPkh)
+    .validFrom(validFrom)
+    .validTo(validTo)
+    .pay.ToAddress(walletAddr, { lovelace: totalLovelace, [assetUnit]: totalTokens })
+    .complete()
+    .then(t => t.sign.withWallet().complete());
+
+  const txHash = await signed.submit();
+  return { txHash, tokens: totalTokens, lovelace: totalLovelace };
 }
 
 // ── Buy ───────────────────────────────────────────────────────────────────────

@@ -10,6 +10,13 @@ export interface TokenMeta {
   /** Lovelace threshold this curve was parameterised with at launch — defaults
    *  to 21,000 ADA. Stored as a string so JSON.stringify doesn't choke on bigint. */
   graduationAdaLovelace?: string;
+  /** Creator dev allocation vesting (optional). When set at launch, the dev
+   *  tokens are locked at vestingAddress until vestingUnlockMs (POSIX ms),
+   *  claimable by the creator only via claimVestedTokens. */
+  vestingAddress?: string;
+  vestingValidatorCbor?: string;
+  vestingUnlockMs?: number;
+  vestingClaimedTxHash?: string;
   imageUri?: string;
   description?: string;
   website?: string;

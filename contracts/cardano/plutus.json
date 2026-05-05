@@ -169,6 +169,59 @@
       },
       "compiledCode": "59010601010029800aba2aba1aab9faab9eaab9dab9a48888896600264653001300700198039804000cc01c0092225980099b8748008c01cdd500144c8cc8a60022b30013001300a375400513259800980118059baa0078a51899198008009bac300f30103010301030103010301030103010300d375400c44b30010018a508acc004cdc79bae3010001375c6020601c6ea800e29462660040046022002806100f2014300d300b3754005164025300a375400d300d003488966002600800515980098071baa009801c5900f456600266e1d20020028acc004c038dd5004c00e2c807a2c806100c0c02cc030004dc3a400060106ea800a2c8030600e00260066ea801e29344d9590011",
       "hash": "8d011ecdb5fb7b84d71557a87bdd729e0ed016b758d74ec96e92d4de"
+    },
+    {
+      "title": "vesting.vesting.spend",
+      "datum": {
+        "title": "_datum",
+        "schema": {
+          "$ref": "#/definitions/Data"
+        }
+      },
+      "redeemer": {
+        "title": "_redeemer",
+        "schema": {
+          "$ref": "#/definitions/Data"
+        }
+      },
+      "parameters": [
+        {
+          "title": "creator_pkh",
+          "schema": {
+            "$ref": "#/definitions/ByteArray"
+          }
+        },
+        {
+          "title": "unlock_posix_ms",
+          "schema": {
+            "$ref": "#/definitions/Int"
+          }
+        }
+      ],
+      "compiledCode": "58ed0101002229800aba2aba1aab9faab9eaab9dab9a9bae0039bad0024888888896600264653001300900198049805000cc0240092225980099b8748008c024dd500144c8cc896600264660020026eb0c040c044c044c044c044c044c044c044c044c038dd5002912cc00400629422b30013371e6eb8c04400403229462660040046024002806901044c96600266e1d2002300d37540031337120146eb4c040c038dd5000c5282018300f300d3754601e601a6ea8c03cc040c040c040c040c040c040c040c034dd500245282016300d001300d300e001300a3754005164020300900130053754013149a26cac8019",
+      "hash": "c18c17b00b8b470eff3363ff186f0da7638ca6e27d9e2ad696f1c38f"
+    },
+    {
+      "title": "vesting.vesting.else",
+      "redeemer": {
+        "schema": {}
+      },
+      "parameters": [
+        {
+          "title": "creator_pkh",
+          "schema": {
+            "$ref": "#/definitions/ByteArray"
+          }
+        },
+        {
+          "title": "unlock_posix_ms",
+          "schema": {
+            "$ref": "#/definitions/Int"
+          }
+        }
+      ],
+      "compiledCode": "58ed0101002229800aba2aba1aab9faab9eaab9dab9a9bae0039bad0024888888896600264653001300900198049805000cc0240092225980099b8748008c024dd500144c8cc896600264660020026eb0c040c044c044c044c044c044c044c044c044c038dd5002912cc00400629422b30013371e6eb8c04400403229462660040046024002806901044c96600266e1d2002300d37540031337120146eb4c040c038dd5000c5282018300f300d3754601e601a6ea8c03cc040c040c040c040c040c040c040c034dd500245282016300d001300d300e001300a3754005164020300900130053754013149a26cac8019",
+      "hash": "c18c17b00b8b470eff3363ff186f0da7638ca6e27d9e2ad696f1c38f"
     }
   ],
   "definitions": {

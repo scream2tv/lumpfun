@@ -4,6 +4,7 @@ import Image from 'next/image';
 import { BondingProgress } from '@/components/bonding-progress';
 import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
+import { VestingClaimPanel } from './vesting-claim';
 import { fetchTokenList, fetchTokenInfo, fetchHolderCount } from '@/lib/blockfrost';
 import { PriceChart } from './price-chart';
 import { TradesHolders } from './trades-holders';
@@ -135,6 +136,18 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
                 discord={token.discord}
               />
             </div>
+
+            {token.vestingAddress && token.vestingValidatorCbor && token.vestingUnlockMs && (
+              <VestingClaimPanel
+                policyId={token.policyId}
+                assetName={token.assetName}
+                creatorAddress={token.creatorAddress}
+                vestingAddress={token.vestingAddress}
+                vestingValidatorCbor={token.vestingValidatorCbor}
+                vestingUnlockMs={token.vestingUnlockMs}
+                vestingClaimedTxHash={token.vestingClaimedTxHash}
+              />
+            )}
 
             <TradePanel
               policyId={token.policyId}
