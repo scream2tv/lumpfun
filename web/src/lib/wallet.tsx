@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import { bech32 } from 'bech32';
 import type { WalletInfo } from './types';
 
 export interface Cip30Api {
@@ -57,6 +58,45 @@ function readCborUint(hex: string): bigint {
   return 0n;
 }
 
+// ── CIP-30 hex → bech32 (no WASM) ────────────────────────────────────────────
+// CIP-30 wallets return getUsedAddresses() entries as CBOR byte-strings:
+//   0x58 0xLL <bytes>     (1-byte length)
+//   0x59 0xLLLL <bytes>   (2-byte length)
+// Strip the CBOR header to get raw address bytes, then bech32-encode with the
+// network-appropriate prefix. Cardano addresses can exceed bech32's default
+// 90-char limit (Shelley base = 57 bytes → ~103 chars), so we pass 1023.
+
+function cborHexToBech32(hex: string): string {
+  // Determine CBOR header → byte count + start offset of raw bytes.
+  if (hex.length < 4) throw new Error('hex too short');
+  const first = parseInt(hex.slice(0, 2), 16);
+  let dataStart: number;
+  if (first === 0x58)      dataStart = 4;   // 1-byte length follows
+  else if (first === 0x59) dataStart = 6;   // 2-byte length follows
+  else if (first >= 0x40 && first <= 0x57) dataStart = 2; // inline length
+  else                     dataStart = 0;   // not CBOR-wrapped — treat as raw
+
+  const rawHex = hex.slice(dataStart);
+  if (rawHex.length < 2 || rawHex.length % 2 !== 0) throw new Error('bad address bytes');
+
+  const bytes = new Uint8Array(rawHex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(rawHex.slice(i * 2, i * 2 + 2), 16);
+  }
+
+  // Header byte's low nibble = network ID (1 = mainnet, 0 = testnet).
+  const isMainnet = (bytes[0] & 0x0f) === 0x01;
+  const prefix = isMainnet ? 'addr' : 'addr_test';
+
+  // Lazy-import bech32 so it stays out of the initial bundle.
+  // (Can't `await` here without changing the helper to async; bech32 is
+  //  synchronous CommonJS so a static require-style import would work but
+  //  Next.js client builds prefer ESM. Inline import via dynamic require is
+  //  unsafe; just use a top-level static import — see import block above.)
+  const words = bech32.toWords(bytes);
+  return bech32.encode(prefix, words, 1023);
+}
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [wallet,     setWallet]     = useState<WalletInfo | null>(null);
   const [walletApi,  setWalletApi]  = useState<Cip30Api | null>(null);
@@ -76,33 +116,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       const cardano = (window as unknown as { cardano: CardanoWindow }).cardano;
       const api = await cardano[walletKey].enable();
 
-      // CIP-30 wallets return CBOR-wrapped hex addresses (e.g. `5839…` for a
-      // 57-byte Shelley base address). Our previous CML.Address.from_hex path
-      // expected raw address bytes, threw on every wallet, and silently fell
-      // back to the CBOR hex string — which then broke /api/wallet-assets
-      // (Blockfrost rejects non-bech32) and showed an unfriendly hex blob in
-      // the header.
-      //
-      // Lucid Evolution's selectWallet.fromAPI handles all CBOR/Byron/Shelley
-      // variants, so let it canonicalise to bech32. This is the same path
-      // the trade panel uses.
-      const network = (process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? 'Preprod') as 'Mainnet' | 'Preprod';
-      const baseUrl = network === 'Mainnet'
-        ? 'https://cardano-mainnet.blockfrost.io/api/v0'
-        : 'https://cardano-preprod.blockfrost.io/api/v0';
-      const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_PROJECT_ID ?? '';
-
-      const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
-      const lucid = await Lucid(new Blockfrost(baseUrl, projectId), network);
-      lucid.selectWallet.fromAPI(api as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
-
-      let address = '';
-      try {
-        address = await lucid.wallet().address();
-      } catch {
-        // Last-ditch: try CIP-30 used→unused and leave hex if even that fails.
-        const addrs = await api.getUsedAddresses();
-        address = addrs[0] ?? (await api.getUnusedAddresses())[0] ?? '';
+      // CIP-30 returns CBOR-wrapped hex (`5839…` for a 57-byte Shelley base
+      // address). We bech32-encode it ourselves with a tiny pure-JS lib —
+      // pulling Lucid Evolution into the connect path drags
+      // cardano-multiplatform-lib's WASM client-side, which Turbopack
+      // currently mis-URLs (`…wasm?dpl=…` → double-encoded → 404). The trade
+      // panel uses Lucid only for Blockfrost calls, never CML, so it dodged
+      // this; the connect flow is the one that triggers it.
+      const addrs = await api.getUsedAddresses();
+      const hexAddr = addrs[0] ?? (await api.getUnusedAddresses())[0] ?? '';
+      let address = hexAddr;
+      if (hexAddr) {
+        try { address = cborHexToBech32(hexAddr); }
+        catch { /* leave hex on parse failure */ }
       }
 
       let lovelace = 0n;
