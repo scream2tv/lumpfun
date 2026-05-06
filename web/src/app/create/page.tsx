@@ -3,7 +3,13 @@
 import { useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWallet } from '@/lib/wallet';
+import { quoteBuy, TOTAL_SUPPLY } from '@/lib/curve-math';
 import type { TokenMeta } from '@/lib/types';
+
+// Curve seeds with MIN_UTXO_LOVELACE (2 ADA) so the initial-buy quote at
+// launch uses (2 ADA, TOTAL_SUPPLY) as the starting reserves. Mirrors the
+// math in cardano-tx.ts launchToken.
+const LAUNCH_MIN_UTXO_LOVELACE = 2_000_000n;
 
 const CREATOR_FEE_BPS = 100;
 const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
@@ -587,6 +593,23 @@ export default function CreatePage() {
               ADA
             </span>
           </div>
+          {(initialBuy ?? 0n) > 0n && (() => {
+            const tokensEstimate = quoteBuy(LAUNCH_MIN_UTXO_LOVELACE, TOTAL_SUPPLY, initialBuy ?? 0n);
+            const pctOfSupply = Number(tokensEstimate) / Number(TOTAL_SUPPLY) * 100;
+            const tickerLabel = ticker || 'tokens';
+            return (
+              <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                You&apos;ll receive{' '}
+                <span style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+                  {Number(tokensEstimate).toLocaleString()} ${tickerLabel}
+                </span>{' '}
+                <span style={{ color: 'var(--text-dim)' }}>
+                  ({pctOfSupply.toFixed(2)}% of supply)
+                </span>
+                {' '}at launch.
+              </p>
+            );
+          })()}
           <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
             Secure your position before others can trade. This ADA goes into the curve immediately.
           </p>
