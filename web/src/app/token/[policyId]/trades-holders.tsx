@@ -147,19 +147,20 @@ function TradesTable({ curveAddress, creatorAddress, assetUnit, ticker }: { curv
   );
 }
 
-function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddress }: { assetUnit: string; curveAddress: string; creatorAddress: string; vestingAddress?: string }) {
+function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddresses = [] }: { assetUnit: string; curveAddress: string; creatorAddress: string; vestingAddresses?: string[] }) {
   const { data: raw = [], isLoading } = useQuery({
     queryKey: ['holders', assetUnit],
     queryFn: () => fetchHolders(assetUnit),
     refetchInterval: 60_000,
   });
 
-  // Hide the vesting script address from the holders list — it has its own
-  // "Vested" metric in the page header. The bonding curve address stays in
-  // the list (labeled "Bonding Curve") so users can see its share visibly.
-  // Then rank descending by quantity so the largest holders sit at the top.
-  const filtered = vestingAddress
-    ? raw.filter(h => h.address !== vestingAddress)
+  // Hide every vesting script address from the holders list — they get
+  // surfaced in the per-position panel and aggregated into the "Vested"
+  // metric. Bonding curve stays (labeled "Bonding Curve").
+  // Then rank descending by quantity so the largest wallets sit at the top.
+  const vestingSet = new Set(vestingAddresses);
+  const filtered = vestingSet.size > 0
+    ? raw.filter(h => !vestingSet.has(h.address))
     : raw;
   const data = [...filtered].sort((a, b) => {
     const aq = BigInt(a.quantity);
@@ -267,13 +268,13 @@ function Empty({ msg }: { msg: string }) {
 export function TradesHolders({
   curveAddress,
   creatorAddress,
-  vestingAddress,
+  vestingAddresses,
   assetUnit,
   ticker,
 }: {
   curveAddress: string;
   creatorAddress: string;
-  vestingAddress?: string;
+  vestingAddresses?: string[];
   assetUnit: string;
   ticker: string;
 }) {
@@ -315,7 +316,7 @@ export function TradesHolders({
 
       {tab === 'trades'
         ? <TradesTable curveAddress={curveAddress} creatorAddress={creatorAddress} assetUnit={assetUnit} ticker={ticker} />
-        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} creatorAddress={creatorAddress} vestingAddress={vestingAddress} />
+        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} creatorAddress={creatorAddress} vestingAddresses={vestingAddresses} />
       }
     </div>
   );

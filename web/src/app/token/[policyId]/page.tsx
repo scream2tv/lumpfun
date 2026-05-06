@@ -59,9 +59,18 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
   // Tokens currently locked at the per-launch vesting script (0 if creator
   // skipped vesting or already claimed). Shown as its own metric so the
   // holders list isn't polluted with the script address.
-  const vestingBalance = token.vestingAddress
-    ? await fetchVestingBalance(token.vestingAddress, assetUnit).catch(() => 0n)
-    : null;
+  // Vested metric sums every active position — launch lockup plus any
+  // creator-added re-vest positions. Each address is queried independently
+  // (its own per-launch script). null only when there are no positions at all.
+  const vestingAddresses = [
+    ...(token.vestingAddress ? [token.vestingAddress] : []),
+    ...((token.extraVestings ?? []).map(v => v.address)),
+  ];
+  const vestingBalance = vestingAddresses.length === 0
+    ? null
+    : (await Promise.all(
+        vestingAddresses.map(addr => fetchVestingBalance(addr, assetUnit).catch(() => 0n)),
+      )).reduce<bigint>((sum, b) => sum + (b ?? 0n), 0n);
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
@@ -143,17 +152,46 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               />
             </div>
 
-            {token.vestingAddress && token.vestingValidatorCbor && token.vestingUnlockMs && (
-              <VestingClaimPanel
-                policyId={token.policyId}
-                assetName={token.assetName}
-                creatorAddress={token.creatorAddress}
-                vestingAddress={token.vestingAddress}
-                vestingValidatorCbor={token.vestingValidatorCbor}
-                vestingUnlockMs={token.vestingUnlockMs}
-                vestingClaimedTxHash={token.vestingClaimedTxHash}
-              />
-            )}
+            {/* Compose every active vesting position: the launch lockup
+                (if the creator picked one) plus any extras from re-vest. */}
+            {(() => {
+              const positions: Array<{
+                address: string;
+                validatorCbor: string;
+                unlockMs: number;
+                claimedTxHash?: string;
+                source?: 'launch' | 'extra';
+                isExtra?: boolean;
+              }> = [];
+              if (token.vestingAddress && token.vestingValidatorCbor && token.vestingUnlockMs) {
+                positions.push({
+                  address:       token.vestingAddress,
+                  validatorCbor: token.vestingValidatorCbor,
+                  unlockMs:      token.vestingUnlockMs,
+                  claimedTxHash: token.vestingClaimedTxHash,
+                  source:        'launch',
+                });
+              }
+              for (const v of token.extraVestings ?? []) {
+                positions.push({
+                  address:       v.address,
+                  validatorCbor: v.validatorCbor,
+                  unlockMs:      v.unlockMs,
+                  claimedTxHash: v.claimedTxHash,
+                  source:        'extra',
+                  isExtra:       true,
+                });
+              }
+              return (
+                <VestingClaimPanel
+                  policyId={token.policyId}
+                  assetName={token.assetName}
+                  ticker={token.ticker}
+                  creatorAddress={token.creatorAddress}
+                  positions={positions}
+                />
+              );
+            })()}
 
             <TradePanel
               policyId={token.policyId}
@@ -202,7 +240,7 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
           <TradesHolders
             curveAddress={token.curveAddress}
             creatorAddress={token.creatorAddress}
-            vestingAddress={token.vestingAddress}
+            vestingAddresses={vestingAddresses}
             assetUnit={assetUnit}
             ticker={token.ticker}
           />

@@ -336,6 +336,54 @@ export async function launchToken(
   };
 }
 
+// ── Re-vest: lock additional tokens at a fresh vesting position ──────────────
+// Builds a tx that pays `amountTokens` of the asset (and MIN_UTXO_LOVELACE)
+// from the creator's wallet to a freshly-derived vesting script address,
+// parameterised with the creator's pkh + the chosen unlock timestamp.
+// Returns the new vesting address + validator CBOR + unlockMs so the caller
+// can persist the position in the registry.
+
+export async function addVestingPosition(
+  walletApi: Cip30Api,
+  policyId: string,
+  assetName: string,
+  amountTokens: bigint,
+  unlockMs: number,
+): Promise<{ txHash: string; address: string; validatorCbor: string; unlockMs: number; amount: bigint }> {
+  if (amountTokens <= 0n) throw new Error('amount must be positive');
+  if (!unlockMs || unlockMs <= Date.now()) throw new Error('unlock time must be in the future');
+
+  const lucid     = await getLucid(walletApi);
+  const network   = (lucid.config().network === 'Mainnet' ? 'Mainnet' : 'Preprod') as 'Mainnet' | 'Preprod';
+  const assetUnit = `${policyId}${assetName}`;
+
+  const walletAddr = await lucid.wallet().address();
+  const creatorPkh = getAddressDetails(walletAddr).paymentCredential?.hash;
+  if (!creatorPkh) throw new Error('Cannot resolve creator pkh');
+
+  const { vestingValidator, vestingAddress } = deriveVestingContract(creatorPkh, BigInt(unlockMs), network);
+
+  const signed = await lucid
+    .newTx()
+    .pay.ToAddressWithData(
+      vestingAddress,
+      { kind: 'inline', value: Data.void() },
+      { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: amountTokens },
+    )
+    .complete()
+    .then(t => t.sign.withWallet().complete());
+
+  const txHash = await signed.submit();
+
+  return {
+    txHash,
+    address:       vestingAddress,
+    validatorCbor: vestingValidator.script,
+    unlockMs,
+    amount:        amountTokens,
+  };
+}
+
 // ── Vesting claim ─────────────────────────────────────────────────────────────
 // Spend the vested UTxO back to the creator's wallet. The validator requires:
 //   1. tx is signed by creator

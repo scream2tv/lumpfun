@@ -17,6 +17,17 @@ export interface TokenMeta {
   vestingValidatorCbor?: string;
   vestingUnlockMs?: number;
   vestingClaimedTxHash?: string;
+  /** Additional creator-initiated lockups added after launch via the
+   *  re-vest flow. Each entry is its own per-launch vesting script
+   *  (parameterised with creator_pkh + unlock_posix_ms) so positions
+   *  with different unlock times don't share a script address. */
+  extraVestings?: Array<{
+    address: string;
+    validatorCbor: string;
+    unlockMs: number;
+    addedAt: string; // ISO
+    claimedTxHash?: string;
+  }>;
   imageUri?: string;
   description?: string;
   website?: string;
