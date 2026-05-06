@@ -183,10 +183,6 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               accent="var(--teal)"
             />
             <MetricCell
-              label="Price per token"
-              value={`₳${(Number(token.priceLovelace) / 1_000_000).toFixed(8)}`}
-            />
-            <MetricCell
               label="Holders"
               value={holderCount > 0 ? holderCount.toLocaleString() : '—'}
             />
