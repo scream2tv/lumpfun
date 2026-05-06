@@ -74,9 +74,14 @@ export async function GET(req: Request) {
 
     const type: 'buy' | 'sell' = adaDelta > 0n ? 'buy' : 'sell';
 
-    // Find the trader address: non-curve output
-    const traderOut = data.outputs.find(o => o.address !== address);
-    const trader = traderOut?.address ?? 'unknown';
+    // Trader = the wallet that signed and paid for the tx — i.e. one of the
+    // non-curve inputs. Picking the *output* would land on the treasury or
+    // creator-fee output (those come first in the curve→treasury→creator→
+    // buyer ordering), which is exactly the bug we just had: every row showed
+    // the treasury address. Use the first non-curve input instead — that's
+    // the buyer/seller's own UTxO funding the tx.
+    const traderIn = data.inputs.find(i => i.address !== address);
+    const trader = traderIn?.address ?? 'unknown';
 
     trades.push({
       txHash:     tx.tx_hash,

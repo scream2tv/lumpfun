@@ -56,6 +56,23 @@ export async function fetchCurveState(curveAddress: string, assetUnit: string) {
   return decodeCurveDatum(utxo.inline_datum);
 }
 
+// Sum up how many of this token are currently locked at the vesting script
+// address. Returns 0n if nothing is locked (claim happened, or never vested).
+// Returns null if the lookup fails so the UI can hide the metric.
+export async function fetchVestingBalance(vestingAddress: string, assetUnit: string): Promise<bigint | null> {
+  const utxos = await bf(`/addresses/${vestingAddress}/utxos/${assetUnit}`) as Array<{
+    amount: Array<{ unit: string; quantity: string }>;
+  }> | null;
+  if (!utxos) return null;
+  let total = 0n;
+  for (const u of utxos) {
+    for (const a of u.amount) {
+      if (a.unit === assetUnit) total += BigInt(a.quantity);
+    }
+  }
+  return total;
+}
+
 // ── Token metadata ────────────────────────────────────────────────────────────
 
 export async function fetchAssetMeta(policyId: string, assetNameHex: string) {

@@ -130,12 +130,19 @@ function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string
   );
 }
 
-function HoldersTable({ assetUnit, curveAddress }: { assetUnit: string; curveAddress: string }) {
-  const { data = [], isLoading } = useQuery({
+function HoldersTable({ assetUnit, curveAddress, vestingAddress }: { assetUnit: string; curveAddress: string; vestingAddress?: string }) {
+  const { data: raw = [], isLoading } = useQuery({
     queryKey: ['holders', assetUnit],
     queryFn: () => fetchHolders(assetUnit),
     refetchInterval: 60_000,
   });
+
+  // Hide the vesting script address from the holders list — it has its own
+  // "Vested" metric in the page header. The bonding curve address stays in
+  // the list (labeled "Bonding Curve") so users can see its share visibly.
+  const data = vestingAddress
+    ? raw.filter(h => h.address !== vestingAddress)
+    : raw;
 
   if (isLoading) return <SkeletonRows />;
   if (data.length === 0) return <Empty msg="No holder data available." />;
@@ -233,10 +240,12 @@ function Empty({ msg }: { msg: string }) {
 
 export function TradesHolders({
   curveAddress,
+  vestingAddress,
   assetUnit,
   ticker,
 }: {
   curveAddress: string;
+  vestingAddress?: string;
   assetUnit: string;
   ticker: string;
 }) {
@@ -278,7 +287,7 @@ export function TradesHolders({
 
       {tab === 'trades'
         ? <TradesTable curveAddress={curveAddress} assetUnit={assetUnit} ticker={ticker} />
-        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} />
+        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} vestingAddress={vestingAddress} />
       }
     </div>
   );

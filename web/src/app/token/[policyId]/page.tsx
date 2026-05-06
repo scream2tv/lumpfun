@@ -5,7 +5,7 @@ import { BondingProgress } from '@/components/bonding-progress';
 import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
 import { VestingClaimPanel } from './vesting-claim';
-import { fetchTokenList, fetchTokenInfo, fetchHolderCount } from '@/lib/blockfrost';
+import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance } from '@/lib/blockfrost';
 import { PriceChart } from './price-chart';
 import { TradesHolders } from './trades-holders';
 import { SocialLinks } from '@/lib/social-links';
@@ -56,6 +56,12 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
 
   const assetUnit = `${token.policyId}${token.assetName}`;
   const holderCount = await fetchHolderCount(assetUnit).catch(() => 0);
+  // Tokens currently locked at the per-launch vesting script (0 if creator
+  // skipped vesting or already claimed). Shown as its own metric so the
+  // holders list isn't polluted with the script address.
+  const vestingBalance = token.vestingAddress
+    ? await fetchVestingBalance(token.vestingAddress, assetUnit).catch(() => 0n)
+    : null;
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
@@ -188,6 +194,13 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               label="Created"
               value={relTime(token.launchedAt)}
             />
+            {vestingBalance !== null && vestingBalance > 0n && (
+              <MetricCell
+                label="Vested"
+                value={`${Number(vestingBalance).toLocaleString()} $${token.ticker}`}
+                accent="var(--teal)"
+              />
+            )}
           </div>
 
           {/* Bonding progress */}
@@ -212,6 +225,7 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
           {/* Trades / Holders */}
           <TradesHolders
             curveAddress={token.curveAddress}
+            vestingAddress={token.vestingAddress}
             assetUnit={assetUnit}
             ticker={token.ticker}
           />
