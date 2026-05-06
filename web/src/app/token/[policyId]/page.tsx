@@ -183,7 +183,7 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               accent="var(--teal)"
             />
             <MetricCell
-              label="Price"
+              label="Price per token"
               value={`₳${(Number(token.priceLovelace) / 1_000_000).toFixed(8)}`}
             />
             <MetricCell
@@ -197,7 +197,9 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
             {vestingBalance !== null && vestingBalance > 0n && (
               <MetricCell
                 label="Vested"
-                value={`${Number(vestingBalance).toLocaleString()} $${token.ticker}`}
+                // Total supply is 1 billion (matches TOTAL_SUPPLY in cardano-tx.ts).
+                // Showing % of supply gives users a quick sense of dev/insider lockup.
+                value={`${(Number(vestingBalance) / 10_000_000).toFixed(2)}%`}
                 accent="var(--teal)"
               />
             )}

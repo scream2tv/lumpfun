@@ -157,9 +157,15 @@ function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddress 
   // Hide the vesting script address from the holders list — it has its own
   // "Vested" metric in the page header. The bonding curve address stays in
   // the list (labeled "Bonding Curve") so users can see its share visibly.
-  const data = vestingAddress
+  // Then rank descending by quantity so the largest holders sit at the top.
+  const filtered = vestingAddress
     ? raw.filter(h => h.address !== vestingAddress)
     : raw;
+  const data = [...filtered].sort((a, b) => {
+    const aq = BigInt(a.quantity);
+    const bq = BigInt(b.quantity);
+    return aq > bq ? -1 : aq < bq ? 1 : 0;
+  });
 
   if (isLoading) return <SkeletonRows />;
   if (data.length === 0) return <Empty msg="No holder data available." />;
