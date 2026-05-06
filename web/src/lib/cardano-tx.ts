@@ -294,29 +294,33 @@ export async function launchToken(
     )
     .pay.ToAddress(treasuryAddress, { lovelace: PLATFORM_FEE });
 
-  // Vesting: if a future unlock time was supplied AND there's a non-zero dev
-  // allocation, route the dev tokens to a vesting script address parameterised
-  // with the creator's pkh + unlock_posix_ms. The creator can later claim the
-  // tokens with a tx that's signed by them and validFrom >= unlock_posix_ms.
+  // Vesting: when vestingUnlockMs is in the future, lock the creator's
+  // tokens at a per-launch vesting script (parameterised with creator_pkh +
+  // unlock_posix_ms). The vested bucket is the *initial-buy* tokens — i.e.
+  // whatever the creator bought into the curve at launch. Free dev allocation
+  // (devTokens) still goes straight to the creator wallet for backward compat
+  // with any non-UI caller; the create page no longer exposes it.
   let vestingAddress:        string | undefined;
   let vestingValidatorCbor:  string | undefined;
   let vestingUnlockMs:       number | undefined;
-  if (devTokens > 0n && params.vestingUnlockMs && params.vestingUnlockMs > Date.now()) {
-    const vesting = deriveVestingContract(creatorPkh, BigInt(params.vestingUnlockMs), network);
+
+  const wantVesting = !!(params.vestingUnlockMs && params.vestingUnlockMs > Date.now());
+  if (wantVesting && tokensToCreator > 0n) {
+    const vesting = deriveVestingContract(creatorPkh, BigInt(params.vestingUnlockMs!), network);
     vestingAddress       = vesting.vestingAddress;
     vestingValidatorCbor = vesting.vestingValidator.script;
     vestingUnlockMs      = params.vestingUnlockMs;
     tx.pay.ToAddressWithData(
       vestingAddress,
       { kind: 'inline', value: Data.void() },
-      { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: devTokens },
+      { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensToCreator },
     );
-  } else if (devTokens > 0n) {
-    tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: devTokens });
+  } else if (tokensToCreator > 0n) {
+    tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensToCreator });
   }
 
-  if (tokensToCreator > 0n) {
-    tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensToCreator });
+  if (devTokens > 0n) {
+    tx.pay.ToAddress(walletAddress, { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: devTokens });
   }
 
   const signed  = await tx.complete().then(t => t.sign.withWallet().complete());

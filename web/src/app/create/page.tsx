@@ -234,10 +234,11 @@ export default function CreatePage() {
   // the 5 ADA chip.
   const [pickedChip,  setPickedChip]  = useState<bigint | null>(null);
 
-  // Creator dev allocation (bps, 0–500) and vesting duration in ms (0 = no
-  // vesting, instant mint). When vestingMs > 0, dev tokens get locked at a
-  // per-launch vesting script address until launch_time + vestingMs.
-  const [devAllocBps, setDevAllocBps] = useState<number>(0);
+  // Vesting duration in ms (0 = no vesting, tokens land in wallet at launch).
+  // Vesting now applies to the *initial buy* tokens — i.e. whatever the
+  // creator buys via the "Buy tokens at launch" section above. Free dev
+  // allocation is no longer exposed; creators put real ADA into the curve
+  // and can optionally lock those bought tokens for a chosen window.
   const [vestingMs,   setVestingMs]   = useState<number>(0);
 
   const [imageFile,    setImageFile]    = useState<File | null>(null);
@@ -312,7 +313,7 @@ export default function CreatePage() {
         name,
         ticker,
         creatorFeeBps: CREATOR_FEE_BPS,
-        devAllocBps,
+        devAllocBps: 0,
         initialBuyLovelace: initialBuy ?? 0n,
         graduationAdaLovelace,
         vestingUnlockMs,
@@ -591,100 +592,65 @@ export default function CreatePage() {
           </p>
         </div>
 
-        {/* Creator allocation + vesting */}
-        <div className="flex flex-col gap-3">
-          <p className="text-sm font-medium" style={{ color: 'var(--text)', fontFamily: 'var(--font-outfit)' }}>
-            Creator allocation
-            <span className="ml-2 text-xs font-normal" style={{ color: 'var(--text-dim)' }}>(optional, max 5%)</span>
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            {[0, 100, 250, 500].map(bps => {
-              const active = devAllocBps === bps;
-              return (
-                <button
-                  key={bps}
-                  type="button"
-                  onClick={() => {
-                    setDevAllocBps(bps);
-                    if (bps === 0) setVestingMs(0);
-                  }}
-                  aria-pressed={active}
-                  style={{
-                    minHeight: 36,
-                    borderRadius: 8,
-                    fontSize: 13,
-                    fontWeight: active ? 600 : 400,
-                    fontFamily: 'var(--font-outfit)',
-                    cursor: 'pointer',
-                    border: active ? '1px solid var(--teal)' : '1px solid var(--border-subtle)',
-                    background: active ? 'rgba(92,224,210,0.1)' : 'var(--bg-elevated)',
-                    color: active ? 'var(--teal)' : 'var(--text-dim)',
-                    transition: 'all 150ms',
-                  }}
-                >
-                  {bps === 0 ? 'None' : `${bps / 100}%`}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Vesting only meaningful when alloc > 0. */}
-          {devAllocBps > 0 && (
-            <>
-              <p className="text-sm font-medium mt-1" style={{ color: 'var(--text)', fontFamily: 'var(--font-outfit)' }}>
-                Vesting
-                <span className="ml-2 text-xs font-normal" style={{ color: 'var(--text-dim)' }}>
-                  on-chain timelock for the creator allocation
+        {/* Vesting — locks the tokens received from the initial buy at a
+            timelocked script address until the chosen unlock time. Only
+            shown when there's an initial buy (no buy = no tokens to vest). */}
+        {(initialBuy ?? 0n) > 0n && (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm font-medium" style={{ color: 'var(--text)', fontFamily: 'var(--font-outfit)' }}>
+              Vesting
+              <span className="ml-2 text-xs font-normal" style={{ color: 'var(--text-dim)' }}>
+                lock your initial-buy tokens at a timelock script
+              </span>
+            </p>
+            <div className="grid grid-cols-5 gap-2">
+              {[
+                { label: 'None',    ms: 0 },
+                { label: '1 hour',  ms: 60 * 60 * 1000 },
+                { label: '24 hours', ms: 24 * 60 * 60 * 1000 },
+                { label: '7 days',  ms: 7  * 24 * 60 * 60 * 1000 },
+                { label: '30 days', ms: 30 * 24 * 60 * 60 * 1000 },
+              ].map(opt => {
+                const active = vestingMs === opt.ms;
+                return (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    onClick={() => setVestingMs(opt.ms)}
+                    aria-pressed={active}
+                    style={{
+                      minHeight: 36,
+                      borderRadius: 8,
+                      fontSize: 12,
+                      fontWeight: active ? 600 : 400,
+                      fontFamily: 'var(--font-outfit)',
+                      cursor: 'pointer',
+                      border: active ? '1px solid var(--teal)' : '1px solid var(--border-subtle)',
+                      background: active ? 'rgba(92,224,210,0.1)' : 'var(--bg-elevated)',
+                      color: active ? 'var(--teal)' : 'var(--text-dim)',
+                      transition: 'all 150ms',
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            {vestingMs > 0 ? (
+              <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                Your initial-buy tokens lock at a vesting script until{' '}
+                <span style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+                  {new Date(Date.now() + vestingMs).toLocaleString()}
                 </span>
+                . Claim from the token page once the timer is up.
               </p>
-              <div className="grid grid-cols-4 gap-2">
-                {[
-                  { label: 'None',    ms: 0 },
-                  { label: '15 min',  ms: 15 * 60 * 1000 },
-                  { label: '1 hour',  ms: 60 * 60 * 1000 },
-                  { label: '24 hours', ms: 24 * 60 * 60 * 1000 },
-                ].map(opt => {
-                  const active = vestingMs === opt.ms;
-                  return (
-                    <button
-                      key={opt.label}
-                      type="button"
-                      onClick={() => setVestingMs(opt.ms)}
-                      aria-pressed={active}
-                      style={{
-                        minHeight: 36,
-                        borderRadius: 8,
-                        fontSize: 12,
-                        fontWeight: active ? 600 : 400,
-                        fontFamily: 'var(--font-outfit)',
-                        cursor: 'pointer',
-                        border: active ? '1px solid var(--teal)' : '1px solid var(--border-subtle)',
-                        background: active ? 'rgba(92,224,210,0.1)' : 'var(--bg-elevated)',
-                        color: active ? 'var(--teal)' : 'var(--text-dim)',
-                        transition: 'all 150ms',
-                      }}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-              {vestingMs > 0 ? (
-                <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  Your {devAllocBps / 100}% allocation locks at a vesting script address until{' '}
-                  <span style={{ color: 'var(--teal)', fontFamily: 'var(--font-jetbrains), monospace' }}>
-                    {new Date(Date.now() + vestingMs).toLocaleString()}
-                  </span>
-                  . You claim it from the token page once the timer is up.
-                </p>
-              ) : (
-                <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  Tokens land in your wallet at launch (no lock).
-                </p>
-              )}
-            </>
-          )}
-        </div>
+            ) : (
+              <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                Tokens land in your wallet at launch (no lock).
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Fee info */}
         <div
