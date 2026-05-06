@@ -263,15 +263,18 @@ export async function launchToken(
   const cip25 = {
     [policyId]: {
       [params.ticker]: {
-        name:        params.name.slice(0, 64),
-        ticker:      params.ticker,
+        // Every CIP-25 v1 string is capped at 64 UTF-8 bytes. Anything longer
+        // must become an array of ≤64-byte chunks that wallets/explorers
+        // concatenate. Vercel Blob image URLs are ~90+ chars so always chunk.
+        name:        chunkString(params.name,                  64),
+        ticker:      chunkString(params.ticker,                64),
         decimals:    0,
-        image:       params.imageUri ?? '',
-        description: chunkString(params.description ?? '', 64),
-        ...(params.website  ? { website:  params.website.slice(0, 64) }  : {}),
-        ...(params.twitter  ? { twitter:  params.twitter.slice(0, 64) }  : {}),
-        ...(params.telegram ? { telegram: params.telegram.slice(0, 64) } : {}),
-        ...(params.discord  ? { discord:  params.discord.slice(0, 64) }  : {}),
+        image:       chunkString(params.imageUri ?? '',        64),
+        description: chunkString(params.description ?? '',     64),
+        ...(params.website  ? { website:  chunkString(params.website,  64) } : {}),
+        ...(params.twitter  ? { twitter:  chunkString(params.twitter,  64) } : {}),
+        ...(params.telegram ? { telegram: chunkString(params.telegram, 64) } : {}),
+        ...(params.discord  ? { discord:  chunkString(params.discord,  64) } : {}),
       },
     },
     version: '1.0',
