@@ -49,15 +49,71 @@ function unitToLabel(unit: string): { policyId: string; name: string } {
   return { policyId, name };
 }
 
-async function fetchWalletAssets(address: string): Promise<AssetRow[]> {
+async function fetchWalletAssetsServer(address: string): Promise<AssetRow[]> {
   const res = await fetch(`/api/wallet-assets?address=${encodeURIComponent(address)}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.assets ?? [];
 }
 
+// Fallback: aggregate non-ADA holdings from the wallet's own UTxOs via Lucid.
+// Used when Blockfrost has nothing for the address yet (fresh wallet that
+// hasn't been seen on-chain). Cross-references with /api/tokens so registry
+// hits get the same deep-link payload as the server path.
+async function fetchWalletAssetsFromUtxos(walletApi: unknown, network: 'Mainnet' | 'Preprod'): Promise<AssetRow[]> {
+  const baseUrl = network === 'Mainnet'
+    ? 'https://cardano-mainnet.blockfrost.io/api/v0'
+    : 'https://cardano-preprod.blockfrost.io/api/v0';
+  const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_PROJECT_ID ?? '';
+
+  const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
+  const lucid = await Lucid(new Blockfrost(baseUrl, projectId), network);
+  lucid.selectWallet.fromAPI(walletApi as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
+  const utxos = await lucid.wallet().getUtxos();
+
+  const totals = new Map<string, bigint>();
+  for (const u of utxos) {
+    for (const [unit, qty] of Object.entries(u.assets)) {
+      if (unit === 'lovelace') continue;
+      totals.set(unit, (totals.get(unit) ?? 0n) + qty);
+    }
+  }
+  if (totals.size === 0) return [];
+
+  // Optional registry enrichment: ignore failures and just emit raw entries.
+  let registry: Array<{ policyId: string; assetName: string; ticker: string; name: string; imageUri?: string }> = [];
+  try {
+    const r = await fetch('/api/tokens');
+    if (r.ok) registry = await r.json();
+  } catch { /* best-effort */ }
+  const byUnit = new Map<string, typeof registry[number]>();
+  for (const t of registry) byUnit.set(`${t.policyId}${t.assetName}`, t);
+
+  const rows: AssetRow[] = Array.from(totals.entries()).map(([unit, qty]) => {
+    const meta = byUnit.get(unit);
+    return {
+      unit,
+      quantity: qty.toString(),
+      registry: meta && {
+        policyId:  meta.policyId,
+        assetName: meta.assetName,
+        ticker:    meta.ticker,
+        name:      meta.name,
+        imageUri:  meta.imageUri,
+      },
+    };
+  });
+  rows.sort((a, b) => {
+    if (!!a.registry !== !!b.registry) return a.registry ? -1 : 1;
+    const aq = BigInt(a.quantity);
+    const bq = BigInt(b.quantity);
+    return aq > bq ? -1 : aq < bq ? 1 : 0;
+  });
+  return rows;
+}
+
 function ConnectedWallet() {
-  const { wallet, disconnect } = useWallet();
+  const { wallet, walletApi, disconnect } = useWallet();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -72,9 +128,20 @@ function ConnectedWallet() {
   }, [open]);
 
   // Asset list — refetched on connect, every 30s, and on window focus.
+  // Server path uses Blockfrost address lookup; if that comes back empty
+  // (Blockfrost 404 for an address it hasn't seen yet, fresh wallet) and we
+  // have a walletApi, fall back to aggregating the wallet's own UTxOs via
+  // Lucid so the UI matches Vespr/Eternl/etc. reality.
   const { data: assets = [] } = useQuery({
     queryKey: ['wallet-assets', wallet?.address],
-    queryFn:  () => fetchWalletAssets(wallet!.address),
+    queryFn:  async () => {
+      const network = (process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? 'Preprod') as 'Mainnet' | 'Preprod';
+      const fromServer = await fetchWalletAssetsServer(wallet!.address);
+      if (fromServer.length > 0 || !walletApi) return fromServer;
+      try {
+        return await fetchWalletAssetsFromUtxos(walletApi, network);
+      } catch { return fromServer; }
+    },
     enabled:  !!wallet?.address,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,

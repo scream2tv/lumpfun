@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { TradeEntry } from '@/app/api/trades/route';
 import type { HolderEntry } from '@/app/api/holders/route';
+import { txExplorerUrl, addressExplorerUrl } from '@/lib/utils';
 
 function truncAddr(addr: string) {
   if (!addr || addr === 'unknown') return '—';
@@ -84,7 +85,7 @@ function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string
                 </td>
                 <td className="py-2 pr-3" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}>
                   <a
-                    href={`https://preprod.cardanoscan.io/address/${t.trader}`}
+                    href={addressExplorerUrl(t.trader)}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ color: 'inherit', textDecoration: 'none' }}
@@ -99,7 +100,7 @@ function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string
                 </td>
                 <td className="py-2">
                   <a
-                    href={`https://preprod.cardanoscan.io/transaction/${t.txHash}`}
+                    href={txExplorerUrl(t.txHash)}
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="View on Cardanoscan"
@@ -172,7 +173,7 @@ function HoldersTable({ assetUnit, curveAddress }: { assetUnit: string; curveAdd
                 </td>
                 <td className="py-2 pr-3" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}>
                   <a
-                    href={`https://preprod.cardanoscan.io/address/${h.address}`}
+                    href={addressExplorerUrl(h.address)}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{ color: 'inherit', textDecoration: 'none' }}

@@ -157,6 +157,33 @@ export interface LaunchFormData {
   vestingUnlockMs?: number;
   imageUri?: string;
   description?: string;
+  // Optional social fields — passed through to CIP-25 metadata at mint so
+  // wallets/explorers can render them without hitting our private registry.
+  website?:  string;
+  twitter?:  string;
+  telegram?: string;
+  discord?:  string;
+}
+
+// CIP-25 v1 caps each metadatum string at 64 UTF-8 bytes. Longer values must
+// become arrays of chunks that explorers/wallets concatenate. We split on
+// byte length, not character count, so multi-byte characters never get cut
+// across a chunk boundary.
+function chunkString(s: string, max: number): string | string[] {
+  if (!s) return '';
+  const bytes = new TextEncoder().encode(s);
+  if (bytes.length <= max) return s;
+  const out: string[] = [];
+  const decoder = new TextDecoder();
+  let i = 0;
+  while (i < bytes.length) {
+    let end = Math.min(i + max, bytes.length);
+    // Walk back if we'd split a UTF-8 continuation byte.
+    while (end > i + 1 && (bytes[end] & 0b1100_0000) === 0b1000_0000) end--;
+    out.push(decoder.decode(bytes.slice(i, end)));
+    i = end;
+  }
+  return out;
 }
 
 const DEFAULT_GRADUATION_ADA = (() => {
@@ -230,11 +257,32 @@ export async function launchToken(
   console.debug('[launch] encoded param:', encodedParam);
   console.debug('[launch] all utxo hashes:', utxos.map(u => `${u.txHash}#${u.outputIndex}`));
 
+  // CIP-25 v1 metadata for wallet/explorer rendering. Attached at label 721.
+  // Asset name key is the UTF-8 ticker (CIP-25 v1). Each metadata string is
+  // capped at 64 UTF-8 bytes; long descriptions become an array of chunks.
+  const cip25 = {
+    [policyId]: {
+      [params.ticker]: {
+        name:        params.name.slice(0, 64),
+        ticker:      params.ticker,
+        decimals:    0,
+        image:       params.imageUri ?? '',
+        description: chunkString(params.description ?? '', 64),
+        ...(params.website  ? { website:  params.website.slice(0, 64) }  : {}),
+        ...(params.twitter  ? { twitter:  params.twitter.slice(0, 64) }  : {}),
+        ...(params.telegram ? { telegram: params.telegram.slice(0, 64) } : {}),
+        ...(params.discord  ? { discord:  params.discord.slice(0, 64) }  : {}),
+      },
+    },
+    version: '1.0',
+  };
+
   const tx = lucid
     .newTx()
     .collectFrom([seed])
     .mintAssets({ [assetUnit]: TOTAL_SUPPLY }, Data.void())
     .attach.MintingPolicy(mintingPolicy)
+    .attachMetadata(721, cip25)
     // SpendingValidator not needed during launch (we're creating, not spending the curve UTxO)
     .pay.ToAddressWithData(
       curveAddress,

@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useWallet, type Cip30Api } from '@/lib/wallet';
 import { quoteBuy, quoteSellGross } from '@/lib/curve-math';
+import { txExplorerUrl } from '@/lib/utils';
 
 const PLATFORM_FEE = 1_000_000n;
 const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
@@ -20,6 +21,16 @@ const BUY_CHIPS  = [
   { label: '500', value: 500_000_000n },
 ] as const;
 const SELL_PCTS  = [10, 25, 50, 100] as const;
+
+// Default slippage tolerance (bps) for both sides of the curve. We keep this
+// tight because LumpFun's bonding curve is exact constant-product on-chain —
+// the only price-changing thing between the local quote and submission is a
+// competing trade landing in the same block. Other launchpads run higher
+// auto-slippage (5%+) because they route through DEXes with shallow off-chain
+// liquidity that can shift mid-flight; ours doesn't. Surface this as an
+// "advanced" UI control later if creators ask for it; for now keep it fixed
+// so users don't foot-gun themselves into a 5% MEV loss on a quiet curve.
+const DEFAULT_SLIPPAGE_BPS = 50; // 0.5%
 
 interface CurveState {
   adaReserve: bigint;
@@ -128,7 +139,17 @@ async function toBech32(addr: string): Promise<string> {
 function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
   const raw = e instanceof Error ? e.message : String(e);
   const m = raw.toLowerCase();
-  if (m.includes('user declined') || m.includes('user rejected') || m.includes('cancelled'))
+  // Pre-sign declines vary by wallet:
+  //   Nami / Eternl     → "user declined" / "user rejected"
+  //   Vespr             → "transaction declined" / "user_declined"
+  //   Lace              → "cancelled"
+  //   Yoroi             → "rejected by user"
+  if (
+    m.includes('user declined') || m.includes('user rejected') ||
+    m.includes('cancelled')     || m.includes('user_declined') ||
+    m.includes('rejected by user') || m.includes('transaction declined') ||
+    m.includes('declined to sign')
+  )
     return 'Transaction cancelled.';
   if (m.includes('collateral'))
     return 'No collateral UTxO set — enable collateral in your wallet settings.';
@@ -152,7 +173,7 @@ function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
 // ── Tx success banner ─────────────────────────────────────────────────────────
 
 function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) {
-  const explorerUrl = `https://preprod.cardanoscan.io/transaction/${hash}`;
+  const explorerUrl = txExplorerUrl(hash);
   return (
     <div
       className="rounded-lg p-3 flex items-start justify-between gap-2"
@@ -312,7 +333,7 @@ export function TradePanel({
         toBech32(creatorAddress),
       ]);
       const res = await buyTokens(
-        walletApi, snapshot, buyAdaL, 50, creatorFeeBps,
+        walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
         policyId, assetName, curveAddress, validatorCbor,
         treasuryBech32, creatorBech32,
       );
@@ -344,7 +365,7 @@ export function TradePanel({
         toBech32(creatorAddress),
       ]);
       const res = await sellTokens(
-        walletApi, snapshot, sellUnits, 50, creatorFeeBps,
+        walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
         policyId, assetName, curveAddress, validatorCbor,
         treasuryBech32, creatorBech32,
       );

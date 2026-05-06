@@ -318,6 +318,12 @@ export default function CreatePage() {
         vestingUnlockMs,
         imageUri,
         description: description || undefined,
+        // Pass through socials so CIP-25 metadata (label 721) at mint carries
+        // them — wallets and explorers render these without our registry.
+        website:  website  || undefined,
+        twitter:  twitter  || undefined,
+        telegram: telegram || undefined,
+        discord:  discord  || undefined,
       }, TREASURY);
 
       const meta: TokenMeta = {

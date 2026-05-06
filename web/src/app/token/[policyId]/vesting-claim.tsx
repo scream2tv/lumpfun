@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useWallet } from '@/lib/wallet';
+import { txExplorerUrl } from '@/lib/utils';
 
 interface Props {
   policyId:             string;
@@ -53,7 +54,7 @@ export function VestingClaimPanel(props: Props) {
           Vested allocation claimed
         </p>
         <a
-          href={`https://cardanoscan.io/transaction/${txHash}`}
+          href={txExplorerUrl(txHash)}
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs truncate block"

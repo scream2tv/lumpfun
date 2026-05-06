@@ -76,17 +76,33 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       const cardano = (window as unknown as { cardano: CardanoWindow }).cardano;
       const api = await cardano[walletKey].enable();
 
-      const addrs = await api.getUsedAddresses();
-      const hexAddr = addrs[0] ?? (await api.getUnusedAddresses())[0] ?? '';
+      // CIP-30 wallets return CBOR-wrapped hex addresses (e.g. `5839…` for a
+      // 57-byte Shelley base address). Our previous CML.Address.from_hex path
+      // expected raw address bytes, threw on every wallet, and silently fell
+      // back to the CBOR hex string — which then broke /api/wallet-assets
+      // (Blockfrost rejects non-bech32) and showed an unfriendly hex blob in
+      // the header.
+      //
+      // Lucid Evolution's selectWallet.fromAPI handles all CBOR/Byron/Shelley
+      // variants, so let it canonicalise to bech32. This is the same path
+      // the trade panel uses.
+      const network = (process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? 'Preprod') as 'Mainnet' | 'Preprod';
+      const baseUrl = network === 'Mainnet'
+        ? 'https://cardano-mainnet.blockfrost.io/api/v0'
+        : 'https://cardano-preprod.blockfrost.io/api/v0';
+      const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_PROJECT_ID ?? '';
 
-      // CIP-30 returns hex; downstream Lucid calls (payToAddress, etc.) want bech32.
-      // Convert via CML — failures fall back to hex (better than nothing for display).
-      let address = hexAddr;
-      if (hexAddr) {
-        try {
-          const { CML } = await import('@lucid-evolution/lucid');
-          address = CML.Address.from_hex(hexAddr).to_bech32(undefined);
-        } catch { /* leave as hex */ }
+      const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
+      const lucid = await Lucid(new Blockfrost(baseUrl, projectId), network);
+      lucid.selectWallet.fromAPI(api as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
+
+      let address = '';
+      try {
+        address = await lucid.wallet().address();
+      } catch {
+        // Last-ditch: try CIP-30 used→unused and leave hex if even that fails.
+        const addrs = await api.getUsedAddresses();
+        address = addrs[0] ?? (await api.getUnusedAddresses())[0] ?? '';
       }
 
       let lovelace = 0n;
