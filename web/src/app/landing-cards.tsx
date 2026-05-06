@@ -168,23 +168,21 @@ function DisclaimerModal({ onAccept, onClose }: { onAccept: () => void; onClose:
           style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-outfit), system-ui, sans-serif', lineHeight: 1.55 }}
         >
           <Bullet>
-            <strong style={{ color: 'var(--text)' }}>Experimental, unaudited software</strong> on
-            Cardano mainnet. Smart contracts have not been independently audited. Bugs can result in
-            permanent loss of funds.
+            <strong style={{ color: 'var(--text)' }}>LumpFun is experimental, unaudited software on Cardano mainnet.</strong>{' '}
+            Bugs or exploits may result in permanent loss of funds.
           </Bullet>
           <Bullet>
-            <strong style={{ color: 'var(--text)' }}>Tokens launched here are not investments.</strong>{' '}
-            They are speculative experiments. Most will go to zero. Only deploy ADA you can afford to
-            lose entirely.
+            <strong style={{ color: 'var(--text)' }}>Tokens launched on LumpFun are highly speculative experiments, not investments.</strong>{' '}
+            Most may lose all value. Only use ADA you can afford to lose.
           </Bullet>
           <Bullet>
-            <strong style={{ color: 'var(--text)' }}>Every trade pays fees:</strong> a flat 1 ADA to
-            the protocol and 1% to the token creator on each buy and sell.
+            <strong style={{ color: 'var(--text)' }}>Every trade includes fees:</strong>{' '}
+            1 ADA to the protocol and 1% to the token creator.
           </Bullet>
           <Bullet>
-            <strong style={{ color: 'var(--text)' }}>You are responsible</strong> for your wallet, your
-            keys, and your trades. The protocol cannot reverse, refund, or recover transactions.
-            Verify ticker, policy ID, and contract before signing.
+            <strong style={{ color: 'var(--text)' }}>Transactions are irreversible.</strong>{' '}
+            You are responsible for your wallet, your keys, and for verifying tokens, contracts, and
+            transaction details before signing.
           </Bullet>
         </ul>
 
@@ -192,7 +190,7 @@ function DisclaimerModal({ onAccept, onClose }: { onAccept: () => void; onClose:
           className="text-xs"
           style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-outfit), system-ui, sans-serif' }}
         >
-          By continuing you confirm you&apos;ve read and accept these terms.
+          By continuing, you acknowledge the risks and accept these terms.
         </p>
 
         <div className="flex gap-2 mt-1">
