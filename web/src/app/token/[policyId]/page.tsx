@@ -48,7 +48,13 @@ function MetricCell({ label, value, accent }: { label: string; value: string; ac
 
 async function TokenDetail({ policyId, assetName }: { policyId: string; assetName: string }) {
   const list = await fetchTokenList();
-  const meta = list.find(t => t.policyId === policyId && t.assetName === assetName);
+  // Strict match first; if the asset query was stripped (some mobile wallet
+  // webviews drop search params on return navigation), fall back to the
+  // first registry row with the same policyId — that's still uniquely the
+  // launched token, since each launch has a one-shot policy.
+  const meta =
+    list.find(t => t.policyId === policyId && t.assetName === assetName) ??
+    list.find(t => t.policyId === policyId);
   if (!meta) notFound();
 
   const token = await fetchTokenInfo(meta);

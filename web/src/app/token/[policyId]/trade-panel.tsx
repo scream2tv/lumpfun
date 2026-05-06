@@ -358,6 +358,17 @@ export function TradePanel({
   }
 
   async function handleSell() {
+    // Debug breadcrumb for the "press Sell → 404" reports. Logs the gating
+    // state so we can see whether the click was handled or the click escaped
+    // to a parent navigation handler somehow.
+    console.debug('[trade] sell click', {
+      hasWallet:  !!walletApi,
+      hasCurve:   !!curve,
+      sellUnits:  sellUnits.toString(),
+      curveAddr:  curveAddress,
+      assetUnit,
+      url:        typeof window !== 'undefined' ? window.location.href : '',
+    });
     if (!walletApi || !curve || !sellUnits) return;
     if (!TREASURY) { setError('Protocol treasury not configured — check NEXT_PUBLIC_TREASURY_ADDRESS'); return; }
     setSubmitting(true); setError(null); setSuccessTx(null);
