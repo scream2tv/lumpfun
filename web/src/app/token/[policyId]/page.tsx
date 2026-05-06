@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import { notFound } from 'next/navigation';
 import Image from 'next/image';
-import { BondingProgress } from '@/components/bonding-progress';
+import { LiveStats } from './live-stats';
 import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
 import { VestingClaimPanel } from './vesting-claim';
@@ -171,41 +171,19 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
         <div className="lg:col-span-2 flex flex-col gap-4">
           {/* Description now lives in the right-column header next to the image. */}
 
-          {/* Inline metrics row (snek.fun style) */}
-          <div
-            className="flex flex-wrap gap-x-6 gap-y-3 sm:gap-x-10 py-2"
-          >
-            <MetricCell
-              label="Market Cap"
-              value={`₳${token.marketCapAda >= 1000
-                ? (token.marketCapAda / 1000).toFixed(2) + 'K'
-                : token.marketCapAda.toFixed(2)}`}
-              accent="var(--teal)"
-            />
-            <MetricCell
-              label="Holders"
-              value={holderCount > 0 ? holderCount.toLocaleString() : '—'}
-            />
-            <MetricCell
-              label="Created"
-              value={relTime(token.launchedAt)}
-            />
-            {vestingBalance !== null && vestingBalance > 0n && (
-              <MetricCell
-                label="Vested"
-                // Total supply is 1 billion (matches TOTAL_SUPPLY in cardano-tx.ts).
-                // Showing % of supply gives users a quick sense of dev/insider lockup.
-                value={`${(Number(vestingBalance) / 10_000_000).toFixed(2)}%`}
-                accent="var(--teal)"
-              />
-            )}
-          </div>
-
-          {/* Bonding progress */}
-          <BondingProgress
-            bondedPct={token.bondedPct}
+          {/* Inline metrics row + bonding progress — live-updated on the
+              client via /api/curve polling. SSR seeds the initial values
+              so the page paints with real numbers, then takes over. */}
+          <LiveStats
+            curveAddress={token.curveAddress}
+            assetUnit={assetUnit}
+            initialAdaReserve={token.adaReserve.toString()}
+            initialTokenReserve={token.tokenReserve.toString()}
+            holderCount={holderCount}
+            createdRel={relTime(token.launchedAt)}
+            vestingBalance={vestingBalance}
+            ticker={token.ticker}
             graduated={token.graduated}
-            adaReserve={Number(token.adaReserve) / 1_000_000}
           />
 
           {/* Price chart */}

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useWallet, type Cip30Api } from '@/lib/wallet';
 import { quoteBuy, quoteSellGross } from '@/lib/curve-math';
 import { txExplorerUrl } from '@/lib/utils';
@@ -50,7 +50,10 @@ interface Props {
 // ── Data fetchers ─────────────────────────────────────────────────────────────
 
 async function fetchCurveState(curveAddress: string, assetUnit: string): Promise<CurveState | null> {
-  const res = await fetch(`/api/curve?address=${encodeURIComponent(curveAddress)}&asset=${encodeURIComponent(assetUnit)}`);
+  const res = await fetch(
+    `/api/curve?address=${encodeURIComponent(curveAddress)}&asset=${encodeURIComponent(assetUnit)}`,
+    { cache: 'no-store' },
+  );
   if (!res.ok) return null;
   const data = await res.json();
   return { adaReserve: BigInt(data.adaReserve), tokenReserve: BigInt(data.tokenReserve) };
@@ -210,12 +213,19 @@ export function TradePanel({
 }: Props) {
   const { wallet, walletApi } = useWallet();
   const assetUnit = `${policyId}${assetName}`;
+  const queryClient = useQueryClient();
 
-  const { data: curve, isLoading: curveLoading, refetch } = useQuery({
+  // Shared with <LiveStats /> via the same query key — React Query dedupes
+  // the network request, so the metric row + trade panel stay in sync off
+  // a single 5-second poll.
+  const { data: curve, isLoading: curveLoading } = useQuery({
     queryKey: ['curve', curveAddress, assetUnit],
     queryFn:  () => fetchCurveState(curveAddress, assetUnit),
-    refetchInterval: 10_000,
+    refetchInterval: 5_000,
   });
+
+  const invalidateCurve = () =>
+    queryClient.invalidateQueries({ queryKey: ['curve', curveAddress, assetUnit] });
 
   const { data: tokenBalance } = useQuery({
     queryKey: ['token-balance', wallet?.address, assetUnit],
@@ -339,7 +349,7 @@ export function TradePanel({
       );
       setSuccessTx(res.txHash);
       setBuyAda(''); setBuyChip(null);
-      setTimeout(() => refetch(), 10_000);
+      invalidateCurve();
     } catch (e) {
       setError(friendlyError(e, 'buy'));
     } finally {
@@ -371,7 +381,7 @@ export function TradePanel({
       );
       setSuccessTx(res.txHash);
       setSellRaw(''); setSellPct(null);
-      setTimeout(() => refetch(), 10_000);
+      invalidateCurve();
     } catch (e) {
       setError(friendlyError(e, 'sell'));
     } finally {

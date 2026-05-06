@@ -5,10 +5,21 @@ import { spotPrice, marketCap, bondedBps, isGraduated } from './curve-math';
 const BASE = process.env.BLOCKFROST_BASE_URL ?? 'https://cardano-preprod.blockfrost.io/api/v0';
 const KEY  = process.env.BLOCKFROST_PROJECT_ID ?? '';
 
-async function bf(path: string): Promise<unknown> {
+interface BfOptions {
+  /** Override default Next.js revalidate window (default 15s). */
+  revalidate?: number;
+  /** Bypass Next.js cache entirely. Use sparingly — meant for hot reads
+   *  where staleness > rate-limit pressure (e.g. live curve state). */
+  noStore?: boolean;
+}
+
+async function bf(path: string, opts: BfOptions = {}): Promise<unknown> {
+  const cacheConfig: RequestInit = opts.noStore
+    ? { cache: 'no-store' }
+    : { next: { revalidate: opts.revalidate ?? 15 } };
   const res = await fetch(`${BASE}${path}`, {
     headers: { project_id: KEY },
-    next: { revalidate: 15 },
+    ...cacheConfig,
   });
   if (!res.ok) {
     if (res.status === 404) return null;
@@ -46,7 +57,11 @@ function decodeCurveDatum(cbor: string): { adaReserve: bigint; tokenReserve: big
 }
 
 export async function fetchCurveState(curveAddress: string, assetUnit: string) {
-  const utxos = await bf(`/addresses/${curveAddress}/utxos/${assetUnit}`) as Array<{
+  // Hot read — clients poll this every ~5s for live market cap / bonding %.
+  // Skip the 15s shared cache so trades surface immediately. Other Blockfrost
+  // helpers (asset metadata, holders, etc.) keep their default cache to stay
+  // within rate limits.
+  const utxos = await bf(`/addresses/${curveAddress}/utxos/${assetUnit}`, { noStore: true }) as Array<{
     inline_datum: string | null;
     amount: Array<{ unit: string; quantity: string }>;
   }> | null;
