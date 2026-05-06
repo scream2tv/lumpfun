@@ -39,7 +39,23 @@ async function fetchHolders(assetUnit: string): Promise<HolderEntry[]> {
   return res.json();
 }
 
-function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string; assetUnit: string; ticker: string }) {
+function DevBadge() {
+  return (
+    <span
+      className="ml-1.5 px-1.5 py-px rounded text-[9px] uppercase tracking-wider font-semibold"
+      style={{
+        background: 'rgba(212,146,42,0.15)',
+        color: 'var(--amber-bright)',
+        border: '1px solid rgba(212,146,42,0.3)',
+        fontFamily: 'var(--font-outfit), system-ui, sans-serif',
+      }}
+    >
+      Dev
+    </span>
+  );
+}
+
+function TradesTable({ curveAddress, creatorAddress, assetUnit, ticker }: { curveAddress: string; creatorAddress: string; assetUnit: string; ticker: string }) {
   const { data = [], isLoading } = useQuery({
     queryKey: ['trades', curveAddress, assetUnit],
     queryFn: () => fetchTrades(curveAddress, assetUnit),
@@ -93,6 +109,7 @@ function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string
                     onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
                   >
                     {truncAddr(t.trader)}
+                    {t.trader === creatorAddress && <DevBadge />}
                   </a>
                 </td>
                 <td className="py-2 pr-3" style={{ color: 'var(--text-dim)' }}>
@@ -130,7 +147,7 @@ function TradesTable({ curveAddress, assetUnit, ticker }: { curveAddress: string
   );
 }
 
-function HoldersTable({ assetUnit, curveAddress, vestingAddress }: { assetUnit: string; curveAddress: string; vestingAddress?: string }) {
+function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddress }: { assetUnit: string; curveAddress: string; creatorAddress: string; vestingAddress?: string }) {
   const { data: raw = [], isLoading } = useQuery({
     queryKey: ['holders', assetUnit],
     queryFn: () => fetchHolders(assetUnit),
@@ -189,7 +206,10 @@ function HoldersTable({ assetUnit, curveAddress, vestingAddress }: { assetUnit: 
                   >
                     {h.address === curveAddress
                       ? <span style={{ color: 'var(--teal)', fontFamily: 'var(--font-outfit), system-ui, sans-serif' }}>Bonding Curve</span>
-                      : truncAddr(h.address)}
+                      : <>
+                          {truncAddr(h.address)}
+                          {h.address === creatorAddress && <DevBadge />}
+                        </>}
                   </a>
                 </td>
                 <td className="py-2 pr-3 tabular-nums" style={{ color: 'var(--text)', fontFamily: 'var(--font-jetbrains), monospace' }}>
@@ -240,11 +260,13 @@ function Empty({ msg }: { msg: string }) {
 
 export function TradesHolders({
   curveAddress,
+  creatorAddress,
   vestingAddress,
   assetUnit,
   ticker,
 }: {
   curveAddress: string;
+  creatorAddress: string;
   vestingAddress?: string;
   assetUnit: string;
   ticker: string;
@@ -286,8 +308,8 @@ export function TradesHolders({
       </div>
 
       {tab === 'trades'
-        ? <TradesTable curveAddress={curveAddress} assetUnit={assetUnit} ticker={ticker} />
-        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} vestingAddress={vestingAddress} />
+        ? <TradesTable curveAddress={curveAddress} creatorAddress={creatorAddress} assetUnit={assetUnit} ticker={ticker} />
+        : <HoldersTable assetUnit={assetUnit} curveAddress={curveAddress} creatorAddress={creatorAddress} vestingAddress={vestingAddress} />
       }
     </div>
   );

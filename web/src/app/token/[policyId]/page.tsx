@@ -225,6 +225,7 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
           {/* Trades / Holders */}
           <TradesHolders
             curveAddress={token.curveAddress}
+            creatorAddress={token.creatorAddress}
             vestingAddress={token.vestingAddress}
             assetUnit={assetUnit}
             ticker={token.ticker}

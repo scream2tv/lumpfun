@@ -14,6 +14,22 @@ interface Props {
   vestingClaimedTxHash?: string;
 }
 
+function extractErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message.split('\n')[0].slice(0, 240);
+  if (typeof e === 'string') return e.split('\n')[0].slice(0, 240);
+  if (e && typeof e === 'object') {
+    const o = e as Record<string, unknown>;
+    if (typeof o.message === 'string') return o.message.split('\n')[0].slice(0, 240);
+    if (typeof o.cause === 'string')   return o.cause.split('\n')[0].slice(0, 240);
+    if (o.cause && typeof o.cause === 'object') {
+      const c = o.cause as Record<string, unknown>;
+      if (typeof c.message === 'string') return c.message.split('\n')[0].slice(0, 240);
+    }
+    try { return JSON.stringify(e).slice(0, 240); } catch { /* fallthrough */ }
+  }
+  return String(e);
+}
+
 function fmtRemaining(ms: number): string {
   if (ms <= 0) return 'unlocked';
   const s = Math.floor(ms / 1000);
@@ -91,7 +107,12 @@ export function VestingClaimPanel(props: Props) {
         });
       } catch { /* registry update is non-critical */ }
     } catch (e) {
-      setError(e instanceof Error ? e.message.split('\n')[0] : String(e));
+      // Lucid Evolution / Effect Schema errors aren't always Error instances —
+      // many are plain objects with nested message/cause, so the default
+      // String(e) gives "[object Object]". Walk common shapes; log the full
+      // value to console so we can debug whatever falls through.
+      console.error('[vesting-claim] failed:', e);
+      setError(extractErrorMessage(e));
     } finally {
       setSubmitting(false);
     }
