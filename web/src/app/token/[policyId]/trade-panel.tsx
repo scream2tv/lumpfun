@@ -182,6 +182,15 @@ function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
     return 'No collateral UTxO set — enable collateral in your wallet settings.';
   if (m.includes('utxo balance insufficient') || m.includes('input balance insufficient'))
     return 'Insufficient ADA — add more to your wallet.';
+  // Lucid's "Not enough ADA leftover to include non-ADA assets in a change
+  // address" — happens when the wallet is fragmented across many small UTxOs
+  // that each carry a few tokens, so the change output can't satisfy
+  // Cardano's min-ADA-per-token-bundle rule. Most common on creator wallets
+  // that have collected many small fee payments. Telling the user to "send
+  // all your ADA to yourself" forces the wallet to consolidate into one
+  // larger UTxO that has enough ADA headroom.
+  if (m.includes('not enough ada leftover') || m.includes('change address'))
+    return 'Wallet UTxOs are fragmented — Cardano can\'t fit your tokens into a change output. Consolidate: send all your ADA from this wallet back to itself in one tx (most wallets have a "Send Max" option), then retry.';
   if (m.includes('minimum output') || m.includes('too small'))
     return raw.split('\n')[0];
   if (m.includes('treasury not configured'))
