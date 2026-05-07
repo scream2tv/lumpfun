@@ -74,7 +74,14 @@ async function fetchTokenBalance(walletApi: Cip30Api, assetUnit: string): Promis
   lucid.selectWallet.fromAPI(walletApi as unknown as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
   const utxos = await lucid.wallet().getUtxos();
   let total = 0n;
-  for (const u of utxos) total += u.assets[assetUnit] ?? 0n;
+  for (const u of utxos) {
+    const q = u.assets[assetUnit];
+    // Some CIP-30 wallets surface quantities as numbers/strings via the
+    // Lucid translation. Coerce explicitly to bigint or this loop throws
+    // "Cannot mix BigInt and other types" on the next iteration.
+    if (q === undefined || q === null) continue;
+    try { total += BigInt(q); } catch { /* skip malformed entry */ }
+  }
   return total;
 }
 

@@ -75,7 +75,13 @@ async function fetchWalletAssetsFromUtxos(walletApi: unknown, network: 'Mainnet'
   for (const u of utxos) {
     for (const [unit, qty] of Object.entries(u.assets)) {
       if (unit === 'lovelace') continue;
-      totals.set(unit, (totals.get(unit) ?? 0n) + qty);
+      // Some CIP-30 wallets surface quantities as numbers/strings via the
+      // Lucid translation. Coerce explicitly to bigint or the running sum
+      // throws "Cannot mix BigInt and other types" on the second asset.
+      let bq: bigint;
+      try { bq = BigInt(qty as string | number | bigint); }
+      catch { continue; }
+      totals.set(unit, (totals.get(unit) ?? 0n) + bq);
     }
   }
   if (totals.size === 0) return [];
