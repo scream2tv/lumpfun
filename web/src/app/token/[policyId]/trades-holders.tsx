@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { TradeEntry } from '@/app/api/trades/route';
 import type { HolderEntry } from '@/app/api/holders/route';
-import { txExplorerUrl, addressExplorerUrl } from '@/lib/utils';
+import { txExplorerUrl, addressExplorerUrl, safeBigInt } from '@/lib/utils';
 
 function truncAddr(addr: string) {
   if (!addr || addr === 'unknown') return '—';
@@ -163,15 +163,15 @@ function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddresse
     ? raw.filter(h => !vestingSet.has(h.address))
     : raw;
   const data = [...filtered].sort((a, b) => {
-    const aq = BigInt(a.quantity);
-    const bq = BigInt(b.quantity);
+    const aq = safeBigInt(a.quantity);
+    const bq = safeBigInt(b.quantity);
     return aq > bq ? -1 : aq < bq ? 1 : 0;
   });
 
   if (isLoading) return <SkeletonRows />;
   if (data.length === 0) return <Empty msg="No holder data available." />;
 
-  const totalTokens = data.reduce((sum, h) => sum + BigInt(h.quantity), 0n);
+  const totalTokens = data.reduce((sum, h) => sum + safeBigInt(h.quantity), 0n);
 
   return (
     <div className="overflow-x-auto">
@@ -192,7 +192,7 @@ function HoldersTable({ assetUnit, curveAddress, creatorAddress, vestingAddresse
         <tbody>
           {data.map((h, i) => {
             const sharePct = totalTokens > 0n
-              ? (Number(BigInt(h.quantity) * 10000n / totalTokens) / 100).toFixed(2)
+              ? (Number(safeBigInt(h.quantity) * 10000n / totalTokens) / 100).toFixed(2)
               : '0.00';
             return (
               <tr

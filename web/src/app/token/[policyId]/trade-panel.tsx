@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useWallet, type Cip30Api } from '@/lib/wallet';
 import { quoteBuy, quoteSellGross } from '@/lib/curve-math';
-import { txExplorerUrl } from '@/lib/utils';
+import { txExplorerUrl, safeBigInt } from '@/lib/utils';
 
 const PLATFORM_FEE = 1_000_000n;
 const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
@@ -60,29 +60,32 @@ async function fetchCurveState(curveAddress: string, assetUnit: string): Promise
   );
   if (!res.ok) return null;
   const data = await res.json();
-  return { adaReserve: BigInt(data.adaReserve), tokenReserve: BigInt(data.tokenReserve) };
+  return { adaReserve: safeBigInt(data.adaReserve), tokenReserve: safeBigInt(data.tokenReserve) };
 }
 
 // Sum the asset quantity across ALL wallet UTxOs (CIP-30) — covers wallets like
 // Eternl that spread funds across many addresses tied to one stake key.
+// Wrapped in a top-level try so a failure inside Lucid's CBOR translation
+// (the path that has thrown "Cannot mix BigInt and other types" on certain
+// wallet/browser combos) degrades to a 0n balance instead of crashing render.
 async function fetchTokenBalance(walletApi: Cip30Api, assetUnit: string): Promise<bigint> {
-  const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
-  const network = process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod';
-  const lucid = await Lucid(new Blockfrost(BF_URL, BF_KEY), network);
-  // Our Cip30Api is a typed subset of Lucid's WalletApi — the underlying object
-  // is the full CIP-30 API at runtime, so cast is safe.
-  lucid.selectWallet.fromAPI(walletApi as unknown as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
-  const utxos = await lucid.wallet().getUtxos();
-  let total = 0n;
-  for (const u of utxos) {
-    const q = u.assets[assetUnit];
-    // Some CIP-30 wallets surface quantities as numbers/strings via the
-    // Lucid translation. Coerce explicitly to bigint or this loop throws
-    // "Cannot mix BigInt and other types" on the next iteration.
-    if (q === undefined || q === null) continue;
-    try { total += BigInt(q); } catch { /* skip malformed entry */ }
+  try {
+    const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
+    const network = process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod';
+    const lucid = await Lucid(new Blockfrost(BF_URL, BF_KEY), network);
+    lucid.selectWallet.fromAPI(walletApi as unknown as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
+    const utxos = await lucid.wallet().getUtxos();
+    let total = 0n;
+    for (const u of utxos) {
+      const q = u.assets?.[assetUnit];
+      if (q === undefined || q === null) continue;
+      total += safeBigInt(q);
+    }
+    return total;
+  } catch (e) {
+    console.warn('[fetchTokenBalance] failed:', e);
+    return 0n;
   }
-  return total;
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
@@ -219,15 +222,79 @@ function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
 
 // ── Tx success banner ─────────────────────────────────────────────────────────
 
+// Poll /api/tx-status for ~120s after submit to detect the silent-drop case
+// (competing trade ate the curve UTxO first → our tx never lands). Cardano
+// wallets show such txs as "Pending" until expiry, leaving users staring at
+// a stuck UI without knowing the trade was outraced. On confirmation we
+// switch to "Confirmed"; on timeout we surface a retry hint.
+type TxState = 'pending' | 'confirmed' | 'unconfirmed';
+
+function useTxConfirmation(hash: string | null): TxState {
+  const [state, setState] = useState<TxState>('pending');
+
+  useEffect(() => {
+    if (!hash) return;
+    setState('pending');
+    let cancelled = false;
+    let attempts  = 0;
+    const MAX_ATTEMPTS = 24; // 24 × 5s = ~120s window
+
+    const tick = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      try {
+        const res = await fetch(`/api/tx-status?hash=${encodeURIComponent(hash)}`, { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json() as { confirmed?: boolean };
+          if (json.confirmed) { if (!cancelled) setState('confirmed'); return; }
+        }
+      } catch { /* network blip — keep polling */ }
+      if (attempts >= MAX_ATTEMPTS) {
+        if (!cancelled) setState('unconfirmed');
+        return;
+      }
+      setTimeout(tick, 5_000);
+    };
+    // Give the chain a beat before the first poll — most blocks are 20s apart.
+    const id = setTimeout(tick, 5_000);
+    return () => { cancelled = true; clearTimeout(id); };
+  }, [hash]);
+
+  return state;
+}
+
 function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) {
   const explorerUrl = txExplorerUrl(hash);
+  const status      = useTxConfirmation(hash);
+
+  const tone = status === 'confirmed'
+    ? { color: 'var(--teal)',       bg: 'rgba(92, 224, 210, 0.08)', border: 'rgba(92, 224, 210, 0.25)' }
+    : status === 'unconfirmed'
+      ? { color: 'var(--lava-bright)', bg: 'rgba(232, 90, 42, 0.08)',  border: 'rgba(232, 90, 42, 0.25)' }
+      : { color: 'var(--teal)',       bg: 'rgba(92, 224, 210, 0.08)', border: 'rgba(92, 224, 210, 0.25)' };
+
+  const headline = status === 'confirmed'
+    ? 'Transaction confirmed'
+    : status === 'unconfirmed'
+      ? 'Transaction did not confirm'
+      : 'Transaction submitted';
+
+  const subline = status === 'unconfirmed'
+    ? 'Likely outraced by another trade on the same curve. The trade was not applied — you can safely retry.'
+    : null;
+
   return (
     <div
       className="rounded-lg p-3 flex items-start justify-between gap-2"
-      style={{ background: 'rgba(92, 224, 210, 0.08)', border: '1px solid rgba(92, 224, 210, 0.25)' }}
+      style={{ background: tone.bg, border: `1px solid ${tone.border}` }}
     >
       <div className="flex flex-col gap-0.5 min-w-0">
-        <p className="text-xs font-semibold" style={{ color: 'var(--teal)' }}>Transaction submitted</p>
+        <p className="text-xs font-semibold" style={{ color: tone.color }}>
+          {headline}
+          {status === 'pending' && (
+            <span className="ml-1.5" style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· awaiting block</span>
+          )}
+        </p>
         <a
           href={explorerUrl}
           target="_blank"
@@ -237,6 +304,11 @@ function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) 
         >
           {hash.slice(0, 16)}…{hash.slice(-8)}
         </a>
+        {subline && (
+          <p className="text-[11px] mt-1" style={{ color: 'var(--text-dim)', lineHeight: 1.45 }}>
+            {subline}
+          </p>
+        )}
       </div>
       <button
         onClick={onDismiss}
@@ -291,6 +363,15 @@ export function TradePanel({
 
   const isBuy = tab === 'buy';
 
+  // Coerce every external value before it touches BigInt arithmetic.
+  // tokenBalance comes from the Lucid path (occasionally fails open with 0n);
+  // wallet.lovelace is set from CIP-30 CBOR; creatorFeeBps from the registry.
+  // If any of these arrive as a Number on a wonky wallet/browser combo, the
+  // render-time `*` / `+` ops would otherwise throw and trip the boundary.
+  const tokenBalanceB    = safeBigInt(tokenBalance);
+  const walletLovelaceB  = wallet ? safeBigInt(wallet.lovelace) : 0n;
+  const creatorFeeBpsB   = safeBigInt(creatorFeeBps);
+
   const buyAdaL: bigint = (() => {
     if (buyChip) return buyChip;
     const n = parseFloat(buyAda);
@@ -303,9 +384,9 @@ export function TradePanel({
     : null;
 
   const sellUnits: bigint = (() => {
-    if (sellPct !== null && tokenBalance) {
+    if (sellPct !== null && tokenBalanceB > 0n) {
       // 100% sells the entire balance; others floor-divide
-      return (tokenBalance * BigInt(sellPct)) / 100n;
+      return (tokenBalanceB * safeBigInt(sellPct)) / 100n;
     }
     const n = parseInt(sellRaw, 10);
     return Number.isFinite(n) && n > 0 ? BigInt(n) : 0n;
@@ -313,15 +394,15 @@ export function TradePanel({
 
   const grossL     = curve && sellUnits > 0n
     ? quoteSellGross(curve.adaReserve, curve.tokenReserve, sellUnits) : 0n;
-  const creatorFeeL = (grossL * BigInt(creatorFeeBps)) / 10000n;
+  const creatorFeeL = (grossL * creatorFeeBpsB) / 10000n;
   const netL        = grossL > PLATFORM_FEE + creatorFeeL
     ? grossL - PLATFORM_FEE - creatorFeeL : 0n;
 
   // Buy-side creator fee: same bps × ada_in (matches validate_buy on-chain).
-  const creatorBuyFeeL = (buyAdaL * BigInt(creatorFeeBps)) / 10000n;
+  const creatorBuyFeeL = (buyAdaL * creatorFeeBpsB) / 10000n;
 
-  const insufficientAda = buyAdaL > 0n && wallet && wallet.lovelace < buyAdaL + PLATFORM_FEE + creatorBuyFeeL + 2_000_000n;
-  const insufficientTokens = sellUnits > 0n && tokenBalance !== undefined && sellUnits > tokenBalance;
+  const insufficientAda = buyAdaL > 0n && wallet && walletLovelaceB < buyAdaL + PLATFORM_FEE + creatorBuyFeeL + 2_000_000n;
+  const insufficientTokens = sellUnits > 0n && tokenBalance !== undefined && sellUnits > tokenBalanceB;
 
   const buyDisabled  = submitting || !wallet || !buyAdaL || curveLoading || !!insufficientAda;
   const sellDisabled = submitting || !wallet || !sellUnits || curveLoading || !!insufficientTokens;
@@ -356,8 +437,8 @@ export function TradePanel({
     setSellPct(pct);
     // Populate the input field with the calculated token amount so the user
     // sees the exact number they're selling and can edit it before submitting.
-    if (tokenBalance && tokenBalance > 0n) {
-      const amt = (tokenBalance * BigInt(pct)) / 100n;
+    if (tokenBalanceB > 0n) {
+      const amt = (tokenBalanceB * safeBigInt(pct)) / 100n;
       setSellRaw(amt.toString());
     } else {
       setSellRaw('');
@@ -654,7 +735,7 @@ export function TradePanel({
             >
               {wallet
                 ? tokenBalance !== undefined
-                  ? `${fmtTok(tokenBalance)} $${ticker}`
+                  ? `${fmtTok(tokenBalanceB)} $${ticker}`
                   : 'Loading…'
                 : `— Connect wallet`}
             </p>
@@ -672,11 +753,11 @@ export function TradePanel({
                     selected={sellPct === pct}
                     accent="lava"
                     onClick={() => handleSellPct(pct)}
-                    disabled={!tokenBalance || tokenBalance === 0n}
+                    disabled={tokenBalanceB === 0n}
                   />
                 ))}
               </div>
-              {tokenBalance === 0n && (
+              {tokenBalance !== undefined && tokenBalanceB === 0n && (
                 <p className="text-xs mt-1" style={{ color: 'var(--text-dim)' }}>
                   No ${ticker} in wallet
                 </p>

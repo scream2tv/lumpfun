@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useQuery } from '@tanstack/react-query';
 import { useWallet } from '@/lib/wallet';
+import { safeBigInt } from '@/lib/utils';
 import {
   Dialog,
   DialogContent,
@@ -31,7 +32,11 @@ function truncate(addr: string) {
 }
 
 function adaDisplay(lovelace: bigint) {
-  return `${(Number(lovelace) / 1_000_000).toFixed(2)} ₳`;
+  // Tolerate non-bigint values from the wallet provider's parseCborLovelace
+  // path — the `Number(lovelace) / 1_000_000` op is fine on either, but
+  // upstream the value is occasionally folded into BigInt arithmetic, so we
+  // normalise once at the display boundary.
+  return `${(Number(safeBigInt(lovelace)) / 1_000_000).toFixed(2)} ₳`;
 }
 
 function fmtQty(q: string): string {
@@ -66,21 +71,27 @@ async function fetchWalletAssetsFromUtxos(walletApi: unknown, network: 'Mainnet'
     : 'https://cardano-preprod.blockfrost.io/api/v0';
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_PROJECT_ID ?? '';
 
-  const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
-  const lucid = await Lucid(new Blockfrost(baseUrl, projectId), network);
-  lucid.selectWallet.fromAPI(walletApi as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
-  const utxos = await lucid.wallet().getUtxos();
+  let utxos: Awaited<ReturnType<ReturnType<Awaited<ReturnType<typeof import('@lucid-evolution/lucid')['Lucid']>>['wallet']>['getUtxos']>>;
+  try {
+    const { Lucid, Blockfrost } = await import('@lucid-evolution/lucid');
+    const lucid = await Lucid(new Blockfrost(baseUrl, projectId), network);
+    lucid.selectWallet.fromAPI(walletApi as Parameters<typeof lucid.selectWallet.fromAPI>[0]);
+    utxos = await lucid.wallet().getUtxos();
+  } catch (e) {
+    // Lucid's CBOR-to-bigint translation throws on certain wallet/browser
+    // combos (e.g. multi-asset CIP-30 responses where one quantity arrives
+    // as a Number). Fail open to the empty list — the server-side path
+    // already covers the common case for real users.
+    console.warn('[fetchWalletAssetsFromUtxos] lucid.getUtxos failed:', e);
+    return [];
+  }
 
   const totals = new Map<string, bigint>();
   for (const u of utxos) {
     for (const [unit, qty] of Object.entries(u.assets)) {
       if (unit === 'lovelace') continue;
-      // Some CIP-30 wallets surface quantities as numbers/strings via the
-      // Lucid translation. Coerce explicitly to bigint or the running sum
-      // throws "Cannot mix BigInt and other types" on the second asset.
-      let bq: bigint;
-      try { bq = BigInt(qty as string | number | bigint); }
-      catch { continue; }
+      const bq = safeBigInt(qty);
+      if (bq === 0n) continue;
       totals.set(unit, (totals.get(unit) ?? 0n) + bq);
     }
   }
@@ -111,8 +122,8 @@ async function fetchWalletAssetsFromUtxos(walletApi: unknown, network: 'Mainnet'
   });
   rows.sort((a, b) => {
     if (!!a.registry !== !!b.registry) return a.registry ? -1 : 1;
-    const aq = BigInt(a.quantity);
-    const bq = BigInt(b.quantity);
+    const aq = safeBigInt(a.quantity);
+    const bq = safeBigInt(b.quantity);
     return aq > bq ? -1 : aq < bq ? 1 : 0;
   });
   return rows;

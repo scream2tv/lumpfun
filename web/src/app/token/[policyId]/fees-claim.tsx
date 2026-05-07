@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useWallet } from '@/lib/wallet';
-import { txExplorerUrl } from '@/lib/utils';
+import { txExplorerUrl, safeBigInt } from '@/lib/utils';
 
 // Per-token "Creator fees" panel. Public-readable balances (anyone can see
 // what's accrued and what's been swept); claim button is creator-only.
@@ -51,8 +51,8 @@ export function CreatorFeesPanel(props: Props) {
   const isCreator = wallet?.address === props.creatorAddress;
 
   const initial: Stats = {
-    unclaimed: BigInt(props.initialUnclaimed),
-    claimed:   BigInt(props.initialClaimed),
+    unclaimed: safeBigInt(props.initialUnclaimed),
+    claimed:   safeBigInt(props.initialClaimed),
   };
 
   const { data: stats = initial } = useQuery<Stats>({
@@ -64,7 +64,7 @@ export function CreatorFeesPanel(props: Props) {
       );
       if (!res.ok) return initial;
       const json = await res.json() as { unclaimed: string; claimed: string };
-      return { unclaimed: BigInt(json.unclaimed), claimed: BigInt(json.claimed) };
+      return { unclaimed: safeBigInt(json.unclaimed), claimed: safeBigInt(json.claimed) };
     },
     refetchInterval: 15_000,
     refetchOnWindowFocus: true,

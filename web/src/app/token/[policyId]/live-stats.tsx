@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { BondingProgress } from '@/components/bonding-progress';
 import { spotPrice, marketCap, bondedBps, TOTAL_SUPPLY } from '@/lib/curve-math';
+import { safeBigInt } from '@/lib/utils';
 
 // Owns the live-updated metrics on the token detail page (Market Cap +
 // bonding progress). Subscribes to the shared ['curve', address, asset]
@@ -62,14 +63,15 @@ export function LiveStats({
     initialData: { adaReserve: initialAdaReserve, tokenReserve: initialTokenReserve } satisfies LiveCurve,
   });
 
-  const adaReserve   = data ? BigInt(data.adaReserve)   : BigInt(initialAdaReserve);
-  const tokenReserve = data ? BigInt(data.tokenReserve) : BigInt(initialTokenReserve);
+  const adaReserve   = safeBigInt(data ? data.adaReserve   : initialAdaReserve);
+  const tokenReserve = safeBigInt(data ? data.tokenReserve : initialTokenReserve);
 
   const price       = spotPrice(adaReserve, tokenReserve);
   const mcapLove    = marketCap(adaReserve, tokenReserve);
   const mcapAda     = Number(mcapLove) / 1_000_000;
   const bondedPct   = Number(bondedBps(adaReserve)) / 100;
   const adaInCurve  = Number(adaReserve) / 1_000_000;
+  const vestingBig  = vestingBalance === null ? null : safeBigInt(vestingBalance);
 
   return (
     <>
@@ -77,10 +79,10 @@ export function LiveStats({
         <MetricCell label="Market Cap" value={fmtMcap(mcapAda)} accent="var(--teal)" />
         <MetricCell label="Holders"    value={holderCount > 0 ? holderCount.toLocaleString() : '—'} />
         <MetricCell label="Created"    value={createdRel} />
-        {vestingBalance !== null && vestingBalance > 0n && (
+        {vestingBig !== null && vestingBig > 0n && (
           <MetricCell
             label="Vested"
-            value={`${(Number(vestingBalance) / Number(TOTAL_SUPPLY) * 100).toFixed(2)}%`}
+            value={`${(Number(vestingBig) / Number(TOTAL_SUPPLY) * 100).toFixed(2)}%`}
             accent="var(--teal)"
           />
         )}

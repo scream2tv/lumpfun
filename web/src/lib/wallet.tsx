@@ -133,7 +133,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
       let lovelace = 0n;
       try {
-        lovelace = parseCborLovelace(await api.getBalance());
+        const parsed = parseCborLovelace(await api.getBalance());
+        // Defensive: parseCborLovelace already returns bigint, but guarantee
+        // bigint at the state boundary so downstream `wallet.lovelace + 1n`
+        // arithmetic on the token page can never throw a mixed-type error.
+        lovelace = typeof parsed === 'bigint' ? parsed : 0n;
       } catch { /* ignore */ }
 
       setWalletApi(api);
