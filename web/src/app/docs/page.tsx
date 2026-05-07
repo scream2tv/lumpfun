@@ -63,16 +63,16 @@ export default function DocsIndex() {
 
       <h2 style={h2}>Quick start</h2>
       <p style={p}>List every token currently launched on the protocol:</p>
-      <CodeBlock>{`curl https://lumpfun.vercel.app/api/tokens`}</CodeBlock>
+      <CodeBlock>{`curl https://lumpfun.com/api/tokens`}</CodeBlock>
 
       <p style={p}>Fetch live curve reserves and a buy quote (no math required):</p>
       <CodeBlock>{`POLICY=ec11a20dc05761a24c415cfc85b42ef5b31caa52dd501082d6744b9c
 
 # Curve state
-curl "https://lumpfun.vercel.app/api/curve?address=$(curl -s https://lumpfun.vercel.app/api/token/$POLICY | jq -r .curveAddress)&asset=$POLICY$(curl -s https://lumpfun.vercel.app/api/token/$POLICY | jq -r .assetName)"
+curl "https://lumpfun.com/api/curve?address=$(curl -s https://lumpfun.com/api/token/$POLICY | jq -r .curveAddress)&asset=$POLICY$(curl -s https://lumpfun.com/api/token/$POLICY | jq -r .assetName)"
 
 # Quote: 5 ADA buy
-curl "https://lumpfun.vercel.app/api/quote?policyId=$POLICY&side=buy&amount=5000000"`}</CodeBlock>
+curl "https://lumpfun.com/api/quote?policyId=$POLICY&side=buy&amount=5000000"`}</CodeBlock>
 
       <h2 style={h2}>Stability</h2>
       <p style={p}>
@@ -85,7 +85,7 @@ curl "https://lumpfun.vercel.app/api/quote?policyId=$POLICY&side=buy&amount=5000
 
       <h2 style={h2}>Network & rate limits</h2>
       <ul style={ul}>
-        <Item>Production API base URL: <code style={code}>https://lumpfun.vercel.app</code></Item>
+        <Item>Production API base URL: <code style={code}>https://lumpfun.com</code></Item>
         <Item>Cardano network: <strong style={strong}>Mainnet</strong>. Tokens use real ADA.</Item>
         <Item>No API key required for read endpoints.</Item>
         <Item>

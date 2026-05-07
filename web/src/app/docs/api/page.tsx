@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: 'Public REST endpoints for LumpFun: token registry, live curve state, quotes, holders, trade history, OHLC bars, and wallet asset lookup.',
 };
 
-const BASE = 'https://lumpfun.vercel.app';
+const BASE = 'https://lumpfun.com';
 
 export default function ApiRef() {
   return (
