@@ -5,7 +5,8 @@ import { LiveStats } from './live-stats';
 import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
 import { VestingClaimPanel } from './vesting-claim';
-import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance } from '@/lib/blockfrost';
+import { CreatorFeesPanel } from './fees-claim';
+import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance, fetchFeeAccumulatorBalance } from '@/lib/blockfrost';
 import { PriceChart } from './price-chart';
 import { TradesHolders } from './trades-holders';
 import { SocialLinks } from '@/lib/social-links';
@@ -77,6 +78,13 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
     : (await Promise.all(
         vestingAddresses.map(addr => fetchVestingBalance(addr, assetUnit).catch(() => 0n)),
       )).reduce<bigint>((sum, b) => sum + (b ?? 0n), 0n);
+
+  // Creator fee accumulator balance (only set on tokens launched after the
+  // accumulator pattern shipped). Server-renders an initial value; the
+  // client panel polls every 15s for live updates as trades land.
+  const feeAccumulatorBalance = token.feeAccumulatorAddress
+    ? await fetchFeeAccumulatorBalance(token.feeAccumulatorAddress).catch(() => 0n)
+    : null;
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
@@ -158,6 +166,19 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               />
             </div>
 
+            {/* Public stat: creator fees collected at the per-launch
+                accumulator. The Claim button only renders for the creator. */}
+            {token.feeAccumulatorAddress && token.feeAccumulatorValidatorCbor && (
+              <CreatorFeesPanel
+                policyId={token.policyId}
+                creatorAddress={token.creatorAddress}
+                feeAccumulatorAddress={token.feeAccumulatorAddress}
+                feeAccumulatorValidatorCbor={token.feeAccumulatorValidatorCbor}
+                initialBalance={(feeAccumulatorBalance ?? 0n).toString()}
+                initialClaimedTxHash={token.feeAccumulatorClaimedTxHash}
+              />
+            )}
+
             {/* Compose every active vesting position: the launch lockup
                 (if the creator picked one) plus any extras from re-vest. */}
             {(() => {
@@ -207,6 +228,7 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               validatorCbor={token.validatorCbor}
               ticker={token.ticker}
               creatorFeeBps={token.creatorFeeBps}
+              feeAccumulatorAddress={token.feeAccumulatorAddress}
             />
           </div>
         </div>

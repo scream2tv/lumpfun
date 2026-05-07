@@ -16,6 +16,11 @@ pub fn ada_net(ada_gross: Int, creator_fee_bps: Int) -> Int {
   ada_gross - creator_fee(ada_gross, creator_fee_bps) - platform_fee
 }
 
+/// Returns true when at least one tx output pays `min_lovelace` to an
+/// address whose payment credential — either VerificationKey *or* Script —
+/// matches `hash`. Accepting both lets the bonding-curve validator route
+/// creator fees to a per-launch accumulator script (parameterised with
+/// the creator's vkey) instead of the creator's wallet directly.
 pub fn output_pays_pkh_at_least(
   outputs: List<Output>,
   pkh: ByteArray,
@@ -27,7 +32,8 @@ pub fn output_pays_pkh_at_least(
       when o.address.payment_credential is {
         Credential.VerificationKey(h) ->
           h == pkh && lovelace_of(o.value) >= min_lovelace
-        _ -> False
+        Credential.Script(h) ->
+          h == pkh && lovelace_of(o.value) >= min_lovelace
       }
     },
   )

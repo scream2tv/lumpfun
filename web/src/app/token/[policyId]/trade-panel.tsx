@@ -45,6 +45,10 @@ interface Props {
   validatorCbor: string;
   ticker: string;
   creatorFeeBps: number;
+  /** Set on tokens launched after the fee accumulator was introduced.
+   *  When present, trades route the creator-fee output here instead of
+   *  to the creator's wallet directly. */
+  feeAccumulatorAddress?: string;
 }
 
 // ── Data fetchers ─────────────────────────────────────────────────────────────
@@ -242,7 +246,7 @@ function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) 
 
 export function TradePanel({
   policyId, assetName, curveAddress, creatorAddress,
-  validatorCbor, ticker, creatorFeeBps,
+  validatorCbor, ticker, creatorFeeBps, feeAccumulatorAddress,
 }: Props) {
   const { wallet, walletApi } = useWallet();
   const assetUnit = `${policyId}${assetName}`;
@@ -378,7 +382,7 @@ export function TradePanel({
       const res = await buyTokens(
         walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
         policyId, assetName, curveAddress, validatorCbor,
-        treasuryBech32, creatorBech32,
+        treasuryBech32, creatorBech32, feeAccumulatorAddress,
       );
       setSuccessTx(res.txHash);
       setBuyAda(''); setBuyChip(null);
@@ -422,7 +426,7 @@ export function TradePanel({
       const res = await sellTokens(
         walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
         policyId, assetName, curveAddress, validatorCbor,
-        treasuryBech32, creatorBech32,
+        treasuryBech32, creatorBech32, feeAccumulatorAddress,
       );
       setSuccessTx(res.txHash);
       setSellRaw(''); setSellPct(null);

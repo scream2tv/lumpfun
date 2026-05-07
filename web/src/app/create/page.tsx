@@ -343,6 +343,8 @@ export default function CreatePage() {
         creatorFeeBps:  CREATOR_FEE_BPS,
         validatorCbor:  result.validatorCbor,
         graduationAdaLovelace: graduationAdaLovelace.toString(),
+        feeAccumulatorAddress:       result.feeAccumulatorAddress,
+        feeAccumulatorValidatorCbor: result.feeAccumulatorValidatorCbor,
         vestingAddress:        result.vestingAddress,
         vestingValidatorCbor:  result.vestingValidatorCbor,
         vestingUnlockMs:       result.vestingUnlockMs,

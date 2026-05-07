@@ -7,6 +7,14 @@ export interface TokenMeta {
   creatorAddress: string;
   creatorFeeBps: number;
   validatorCbor: string; // parameterised bonding curve script for this token
+  /** Per-launch creator fee accumulator. New launches route every trade's
+   *  creator-fee output here so fees pile up at one script address; the
+   *  creator sweeps via claimCreatorFees. Tokens launched before this
+   *  feature have these fields undefined and pay fees to creatorAddress. */
+  feeAccumulatorAddress?: string;
+  feeAccumulatorValidatorCbor?: string;
+  /** Most recent successful claim tx hash (best-effort display). */
+  feeAccumulatorClaimedTxHash?: string;
   /** Lovelace threshold this curve was parameterised with at launch — defaults
    *  to 21,000 ADA. Stored as a string so JSON.stringify doesn't choke on bigint. */
   graduationAdaLovelace?: string;
