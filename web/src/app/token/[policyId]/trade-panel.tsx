@@ -1,10 +1,15 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useWallet, type Cip30Api } from '@/lib/wallet';
 import { quoteBuy, quoteSellGross } from '@/lib/curve-math';
 import { txExplorerUrl, safeBigInt } from '@/lib/utils';
+import {
+  classifyError, emitTxLog, outracedOutcome,
+  shouldAutoRetry, TX_UX,
+  type TxAttemptLog, type TxOutcome, type TxOutcomeState,
+} from '@/lib/tx-errors';
 
 const PLATFORM_FEE = 1_000_000n;
 const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
@@ -151,74 +156,10 @@ async function toBech32(addr: string): Promise<string> {
   }
 }
 
-// ── Error message mapper ──────────────────────────────────────────────────────
-
-// Extract a readable string from whatever the wallet / Lucid throws. CIP-30
-// errors (Vespr, Eternl, Lace) come back as { code, info } plain objects,
-// not Error instances, so the previous String(e) path gave "[object Object]".
-function rawErrorString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === 'string') return e;
-  if (e && typeof e === 'object') {
-    const o = e as Record<string, unknown>;
-    // CIP-30: { code: number, info: string }
-    if (typeof o.info === 'string') {
-      const code = typeof o.code === 'number' ? ` (code ${o.code})` : '';
-      return `${o.info}${code}`;
-    }
-    if (typeof o.message === 'string') return o.message;
-    if (typeof o.cause === 'string')   return o.cause;
-    if (o.cause && typeof o.cause === 'object') {
-      const c = o.cause as Record<string, unknown>;
-      if (typeof c.message === 'string') return c.message;
-    }
-    try { return JSON.stringify(e); } catch { /* fallthrough */ }
-  }
-  return String(e);
-}
-
-function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
-  const raw = rawErrorString(e);
-  const m = raw.toLowerCase();
-  // Pre-sign declines vary by wallet:
-  //   Nami / Eternl     → "user declined" / "user rejected"
-  //   Vespr             → "transaction declined" / "user_declined"
-  //   Lace              → "cancelled"
-  //   Yoroi             → "rejected by user"
-  if (
-    m.includes('user declined') || m.includes('user rejected') ||
-    m.includes('cancelled')     || m.includes('user_declined') ||
-    m.includes('rejected by user') || m.includes('transaction declined') ||
-    m.includes('declined to sign')
-  )
-    return 'Transaction cancelled.';
-  if (m.includes('collateral'))
-    return 'No collateral UTxO set — enable collateral in your wallet settings.';
-  if (m.includes('utxo balance insufficient') || m.includes('input balance insufficient'))
-    return 'Insufficient ADA — add more to your wallet.';
-  // Lucid's "Not enough ADA leftover to include non-ADA assets in a change
-  // address" — happens when the wallet is fragmented across many small UTxOs
-  // that each carry a few tokens, so the change output can't satisfy
-  // Cardano's min-ADA-per-token-bundle rule. Most common on creator wallets
-  // that have collected many small fee payments. Telling the user to "send
-  // all your ADA to yourself" forces the wallet to consolidate into one
-  // larger UTxO that has enough ADA headroom.
-  if (m.includes('not enough ada leftover') || m.includes('change address'))
-    return 'Wallet UTxOs are fragmented — Cardano can\'t fit your tokens into a change output. Consolidate: send all your ADA from this wallet back to itself in one tx (most wallets have a "Send Max" option), then retry.';
-  if (m.includes('minimum output') || m.includes('too small'))
-    return raw.split('\n')[0];
-  if (m.includes('treasury not configured'))
-    return raw.split('\n')[0];
-  if (m.includes('no utxos') || m.includes('no utxo found'))
-    return 'No UTxOs found — refresh and reconnect your wallet.';
-  if (m.includes('validator crashed') || m.includes('exited prematurely'))
-    return 'Smart contract rejected the transaction — the trade may already be in flight. Wait 30s and retry.';
-  if (m.includes('network') || m.includes('fetch failed') || m.includes('econnrefused'))
-    return 'Network error — check your connection and try again.';
-  if (m.includes('script integrity'))
-    return 'Script hash mismatch — reload the page and retry.';
-  return `${op === 'buy' ? 'Buy' : 'Sell'} failed: ${raw.split('\n')[0].slice(0, 120)}`;
-}
+// ── Error display ─────────────────────────────────────────────────────────────
+// classifyError + TX_UX live in @/lib/tx-errors. Anything in this file that
+// surfaces an error to the user runs the throwable through classifyError so
+// every render path goes through one taxonomy.
 
 // ── Tx success banner ─────────────────────────────────────────────────────────
 
@@ -229,12 +170,16 @@ function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
 // switch to "Confirmed"; on timeout we surface a retry hint.
 type TxState = 'pending' | 'confirmed' | 'unconfirmed';
 
-function useTxConfirmation(hash: string | null): TxState {
+function useTxConfirmation(
+  hash: string | null,
+  onTerminal?: (state: 'confirmed' | 'unconfirmed', elapsedMs: number) => void,
+): TxState {
   const [state, setState] = useState<TxState>('pending');
 
   useEffect(() => {
     if (!hash) return;
     setState('pending');
+    const startedAt = Date.now();
     let cancelled = false;
     let attempts  = 0;
     const MAX_ATTEMPTS = 24; // 24 × 5s = ~120s window
@@ -246,11 +191,20 @@ function useTxConfirmation(hash: string | null): TxState {
         const res = await fetch(`/api/tx-status?hash=${encodeURIComponent(hash)}`, { cache: 'no-store' });
         if (res.ok) {
           const json = await res.json() as { confirmed?: boolean };
-          if (json.confirmed) { if (!cancelled) setState('confirmed'); return; }
+          if (json.confirmed) {
+            if (!cancelled) {
+              setState('confirmed');
+              onTerminal?.('confirmed', Date.now() - startedAt);
+            }
+            return;
+          }
         }
       } catch { /* network blip — keep polling */ }
       if (attempts >= MAX_ATTEMPTS) {
-        if (!cancelled) setState('unconfirmed');
+        if (!cancelled) {
+          setState('unconfirmed');
+          onTerminal?.('unconfirmed', Date.now() - startedAt);
+        }
         return;
       }
       setTimeout(tick, 5_000);
@@ -258,14 +212,23 @@ function useTxConfirmation(hash: string | null): TxState {
     // Give the chain a beat before the first poll — most blocks are 20s apart.
     const id = setTimeout(tick, 5_000);
     return () => { cancelled = true; clearTimeout(id); };
+    // onTerminal is intentionally not in deps — we want the callback at hash
+    // birth, not on every parent re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hash]);
 
   return state;
 }
 
-function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) {
+function TxBanner({
+  hash, onDismiss, onTerminal,
+}: {
+  hash: string;
+  onDismiss: () => void;
+  onTerminal?: (state: 'confirmed' | 'unconfirmed', elapsedMs: number) => void;
+}) {
   const explorerUrl = txExplorerUrl(hash);
-  const status      = useTxConfirmation(hash);
+  const status      = useTxConfirmation(hash, onTerminal);
 
   const tone = status === 'confirmed'
     ? { color: 'var(--teal)',       bg: 'rgba(92, 224, 210, 0.08)', border: 'rgba(92, 224, 210, 0.25)' }
@@ -321,6 +284,74 @@ function TxBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) 
   );
 }
 
+// ── Structured error banner ─────────────────────────────────────────────────
+// Renders the TX_UX entry for whatever code classifyError produced. Cancels
+// (USER_REJECTED) get a softer tone with no CTA; everything else gets the
+// red lava treatment plus a primary action.
+function ErrorBanner({
+  outcome, onRetry, onReconnect, onDismiss,
+}: {
+  outcome: Exclude<TxOutcome, { state: 'success' }>;
+  onRetry?:     () => void;
+  onReconnect?: () => void;
+  onDismiss:    () => void;
+}) {
+  const ux       = TX_UX[outcome.code];
+  const cancelled = outcome.state === 'user_cancelled';
+  const tone = cancelled
+    ? { color: 'var(--text-dim)',     bg: 'var(--bg-elevated)',           border: 'var(--border-subtle)' }
+    : { color: 'var(--lava-bright)',  bg: 'rgba(232, 90, 42, 0.08)',      border: 'rgba(232, 90, 42, 0.25)' };
+
+  const ctaHandler = ux.cta === 'retry'     ? onRetry
+                  : ux.cta === 'reconnect' ? onReconnect
+                  : undefined;
+  const ctaLabel  = ux.cta === 'retry'     ? 'Retry'
+                  : ux.cta === 'reconnect' ? 'Reconnect'
+                  : ux.cta === 'report'    ? 'Report'
+                  : null;
+
+  return (
+    <div
+      role="alert"
+      className="rounded-lg p-3 flex items-start justify-between gap-3"
+      style={{ background: tone.bg, border: `1px solid ${tone.border}` }}
+    >
+      <div className="flex flex-col gap-1 min-w-0 flex-1">
+        <p className="text-xs font-semibold" style={{ color: tone.color, fontFamily: 'var(--font-outfit)' }}>
+          {ux.headline}
+        </p>
+        <p className="text-[11px]" style={{ color: 'var(--text-dim)', lineHeight: 1.45 }}>
+          {ux.body}
+        </p>
+        {ctaLabel && ctaHandler && (
+          <button
+            type="button"
+            onClick={ctaHandler}
+            className="self-start mt-1 text-xs font-semibold rounded-md"
+            style={{
+              padding: '5px 10px',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border-mid)',
+              color: 'var(--text)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-outfit)',
+            }}
+          >
+            {ctaLabel}
+          </button>
+        )}
+      </div>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        style={{ color: 'var(--text-dim)', fontSize: 16, lineHeight: 1, cursor: 'pointer', background: 'none', border: 'none', flexShrink: 0 }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function TradePanel({
@@ -333,8 +364,9 @@ export function TradePanel({
 
   // Shared with <LiveStats /> via the same query key — React Query dedupes
   // the network request, so the metric row + trade panel stay in sync off
-  // a single 5-second poll.
-  const { data: curve, isLoading: curveLoading } = useQuery({
+  // a single 5-second poll. We pull `refetch` so the auto-retry path can
+  // pull a fresh curve UTxO before re-attempting on a race-style failure.
+  const { data: curve, isLoading: curveLoading, refetch: refetchCurve } = useQuery({
     queryKey: ['curve', curveAddress, assetUnit],
     queryFn:  () => fetchCurveState(curveAddress, assetUnit),
     refetchInterval: 5_000,
@@ -356,8 +388,20 @@ export function TradePanel({
   const [sellPct,      setSellPct]   = useState<number | null>(null);
   const [sellRaw,      setSellRaw]   = useState('');
   const [submitting,   setSubmitting]= useState(false);
-  const [error,        setError]     = useState<string | null>(null);
-  const [successTx,    setSuccessTx] = useState<string | null>(null);
+  const [outcome,      setOutcome]   = useState<TxOutcome | null>(null);
+  // Track the last attempt's metadata so the post-submit poller (which
+  // resolves async, after handleBuy/Sell has returned) can emit the final
+  // structured log with the same correlation as the initial attempt.
+  // The post-submit confirmation poller resolves async, after runTrade has
+  // already returned. Stash just enough correlation here so the poller's
+  // terminal callback can emit a single structured TxAttemptLog with
+  // confirmedAfterMs (or downgrade to TX_OUTRACED).
+  const lastAttemptRef = useRef<{
+    op:        'buy' | 'sell';
+    startedAt: number;
+    attempt:   number;
+    txHash:    string;
+  } | null>(null);
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
@@ -410,7 +454,7 @@ export function TradePanel({
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   const switchTab = useCallback((t: 'buy' | 'sell') => {
-    setTab(t); setError(null); setSuccessTx(null);
+    setTab(t); setOutcome(null);
   }, []);
 
   function handleBuyChip(value: bigint) {
@@ -422,16 +466,16 @@ export function TradePanel({
       // exact number they're spending and can edit it before submitting.
       setBuyAda((Number(value) / 1_000_000).toString());
     }
-    setError(null);
+    setOutcome(null);
   }
 
   function handleBuyInput(v: string) {
-    setBuyAda(v); setBuyChip(null); setError(null);
+    setBuyAda(v); setBuyChip(null); setOutcome(null);
   }
 
   function handleSellPct(pct: number) {
     if (sellPct === pct) {
-      setSellPct(null); setSellRaw(''); setError(null);
+      setSellPct(null); setSellRaw(''); setOutcome(null);
       return;
     }
     setSellPct(pct);
@@ -443,19 +487,31 @@ export function TradePanel({
     } else {
       setSellRaw('');
     }
-    setError(null);
+    setOutcome(null);
   }
 
   function handleSellInput(v: string) {
-    setSellRaw(v); setSellPct(null); setError(null);
+    setSellRaw(v); setSellPct(null); setOutcome(null);
   }
 
-  async function handleBuy() {
-    if (!walletApi || !curve || !buyAdaL) return;
-    if (!TREASURY) { setError('Protocol treasury not configured — check NEXT_PUBLIC_TREASURY_ADDRESS'); return; }
-    setSubmitting(true); setError(null); setSuccessTx(null);
+  // ── Trade attempt (shared buy/sell core) ───────────────────────────────────
+  // Wraps the Lucid call with classification, structured logging, and a
+  // single auto-retry for race-style failures (CURVE_UTXO_GONE /
+  // VALIDATOR_REJECTED). Every code path leaves either an outcome on screen
+  // or kicks off the post-submit confirmation poller — never both unset.
+  async function runTrade(op: 'buy' | 'sell', attempt = 1): Promise<void> {
+    if (!walletApi || !curve) return;
+    if (!TREASURY) {
+      const out: TxOutcome = { state: 'contact_support', code: 'CONFIG_ERROR', raw: 'NEXT_PUBLIC_TREASURY_ADDRESS missing' };
+      setOutcome(out);
+      finalizeLog({ op, attempt, startedAt: Date.now(), result: out });
+      return;
+    }
+
+    const startedAt = Date.now();
+    if (attempt === 1) { setSubmitting(true); setOutcome(null); }
+
     try {
-      const { buyTokens } = await import('@/lib/cardano-tx');
       const snapshot = {
         adaReserve:   curve.adaReserve,
         tokenReserve: curve.tokenReserve,
@@ -467,20 +523,124 @@ export function TradePanel({
         toBech32(TREASURY),
         toBech32(creatorAddress),
       ]);
-      const res = await buyTokens(
-        walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
-        policyId, assetName, curveAddress, validatorCbor,
-        treasuryBech32, creatorBech32, feeAccumulatorAddress,
-      );
-      setSuccessTx(res.txHash);
-      setBuyAda(''); setBuyChip(null);
+
+      let res: { txHash: string };
+      if (op === 'buy') {
+        if (!buyAdaL) return;
+        const { buyTokens } = await import('@/lib/cardano-tx');
+        res = await buyTokens(
+          walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
+          policyId, assetName, curveAddress, validatorCbor,
+          treasuryBech32, creatorBech32, feeAccumulatorAddress,
+        );
+        setBuyAda(''); setBuyChip(null);
+      } else {
+        if (!sellUnits) return;
+        const { sellTokens } = await import('@/lib/cardano-tx');
+        res = await sellTokens(
+          walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
+          policyId, assetName, curveAddress, validatorCbor,
+          treasuryBech32, creatorBech32, feeAccumulatorAddress,
+        );
+        setSellRaw(''); setSellPct(null);
+      }
+
+      // Submit accepted. Park correlation for the post-submit poller so it
+      // can emit the terminal log with confirmedAfterMs once /api/tx-status
+      // resolves (or the 120 s window expires → TX_OUTRACED).
+      lastAttemptRef.current = { op, startedAt, attempt, txHash: res.txHash };
+      setOutcome({ state: 'success', txHash: res.txHash });
       invalidateCurve();
     } catch (e) {
-      console.error('[trade] buy failed:', e);
-      setError(friendlyError(e, 'buy'));
+      const cls = classifyError(e);
+      let result: TxOutcome;
+      if (cls.state === 'user_cancelled') {
+        result = { state: 'user_cancelled', code: 'USER_REJECTED', raw: cls.raw };
+      } else if (cls.state === 'retry_safe') {
+        result = { state: 'retry_safe', code: cls.code, raw: cls.raw };
+      } else {
+        result = { state: 'contact_support', code: cls.code, raw: cls.raw };
+      }
+
+      // Auto-retry once on race-style failures: refetch the curve so the
+      // next attempt sees the new reserves, then recurse with attempt+1.
+      if (shouldAutoRetry(cls.code, attempt)) {
+        await refetchCurve();
+        return runTrade(op, attempt + 1);
+      }
+
+      console.error(`[trade] ${op} failed:`, e);
+      setOutcome(result);
+      finalizeLog({ op, attempt, startedAt, result, errorRaw: cls.raw });
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function finalizeLog(args: {
+    op: 'buy' | 'sell';
+    attempt: number;
+    startedAt: number;
+    result: TxOutcome;
+    errorRaw?: string;
+    confirmedAfterMs?: number;
+  }) {
+    const log: TxAttemptLog = {
+      ts:                 new Date().toISOString(),
+      op:                 args.op,
+      policyId,
+      assetUnit,
+      walletName:         wallet?.name ?? 'unknown',
+      network:            (process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod'),
+      adaIn:              args.op === 'buy'  ? buyAdaL.toString()  : undefined,
+      tokensIn:           args.op === 'sell' ? sellUnits.toString() : undefined,
+      curveAdaReserve:    curve?.adaReserve.toString(),
+      curveTokenReserve:  curve?.tokenReserve.toString(),
+      creatorFeeBps,
+      slippageBps:        DEFAULT_SLIPPAGE_BPS,
+      outcome:            args.result.state as TxOutcomeState,
+      code:               args.result.state === 'success' ? undefined : (args.result as Exclude<TxOutcome, { state: 'success' }>).code,
+      txHash:             args.result.state === 'success' ? args.result.txHash : undefined,
+      durationMs:         Date.now() - args.startedAt,
+      retryCount:         args.attempt - 1,
+      errorMessage:       args.errorRaw?.split('\n')[0].slice(0, 240),
+      errorRaw:           args.errorRaw?.slice(0, 1024),
+      confirmedAfterMs:   args.confirmedAfterMs,
+    };
+    emitTxLog(log);
+  }
+
+  // Triggered from the post-submit confirmation poller. Translates the
+  // poll's terminal state into a final TxOutcome + log record so success
+  // and TX_OUTRACED both flow through the same logging pipeline.
+  const handleTxTerminal = useCallback((state: 'confirmed' | 'unconfirmed', elapsedMs: number) => {
+    const ctx = lastAttemptRef.current;
+    if (!ctx) return;
+    if (state === 'confirmed') {
+      finalizeLog({
+        op:               ctx.op,
+        attempt:          ctx.attempt,
+        startedAt:        ctx.startedAt,
+        result:           { state: 'success', txHash: ctx.txHash },
+        confirmedAfterMs: elapsedMs,
+      });
+    } else {
+      const out = outracedOutcome();
+      setOutcome(out);
+      finalizeLog({
+        op:        ctx.op,
+        attempt:   ctx.attempt,
+        startedAt: ctx.startedAt,
+        result:    out,
+        errorRaw:  out.raw,
+      });
+    }
+    lastAttemptRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleBuy() {
+    await runTrade('buy');
   }
 
   async function handleSell() {
@@ -495,36 +655,7 @@ export function TradePanel({
       assetUnit,
       url:        typeof window !== 'undefined' ? window.location.href : '',
     });
-    if (!walletApi || !curve || !sellUnits) return;
-    if (!TREASURY) { setError('Protocol treasury not configured — check NEXT_PUBLIC_TREASURY_ADDRESS'); return; }
-    setSubmitting(true); setError(null); setSuccessTx(null);
-    try {
-      const { sellTokens } = await import('@/lib/cardano-tx');
-      const snapshot = {
-        adaReserve:   curve.adaReserve,
-        tokenReserve: curve.tokenReserve,
-        txHash:       '',
-        outputIndex:  0,
-        lovelace:     curve.adaReserve,
-      };
-      const [treasuryBech32, creatorBech32] = await Promise.all([
-        toBech32(TREASURY),
-        toBech32(creatorAddress),
-      ]);
-      const res = await sellTokens(
-        walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
-        policyId, assetName, curveAddress, validatorCbor,
-        treasuryBech32, creatorBech32, feeAccumulatorAddress,
-      );
-      setSuccessTx(res.txHash);
-      setSellRaw(''); setSellPct(null);
-      invalidateCurve();
-    } catch (e) {
-      console.error('[trade] sell failed:', e);
-      setError(friendlyError(e, 'sell'));
-    } finally {
-      setSubmitting(false);
-    }
+    await runTrade('sell');
   }
 
   // ── Shared styles ───────────────────────────────────────────────────────────
@@ -579,8 +710,26 @@ export function TradePanel({
       className="rounded-xl p-4 flex flex-col gap-3"
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-mid)' }}
     >
-      {/* Success banner */}
-      {successTx && <TxBanner hash={successTx} onDismiss={() => setSuccessTx(null)} />}
+      {/* Outcome banner — exactly one of:
+            success           → TxBanner (polls /api/tx-status until confirmed/outraced)
+            user_cancelled    → soft cancel notice
+            retry_safe        → red banner + Retry/Reconnect CTA
+            contact_support   → red banner + Report CTA
+          The poller's terminal callback re-emits `outcome` if it ages into TX_OUTRACED. */}
+      {outcome?.state === 'success' && (
+        <TxBanner
+          hash={outcome.txHash}
+          onDismiss={() => setOutcome(null)}
+          onTerminal={handleTxTerminal}
+        />
+      )}
+      {outcome && outcome.state !== 'success' && (
+        <ErrorBanner
+          outcome={outcome}
+          onRetry={() => runTrade(tab)}
+          onDismiss={() => setOutcome(null)}
+        />
+      )}
 
       {/* Tab switcher */}
       <div className="flex gap-1 p-1 rounded-lg" style={{ background: 'var(--bg-elevated)' }}>
@@ -713,12 +862,7 @@ export function TradePanel({
               : 'Buy'}
           </button>
 
-          {/* Inline error */}
-          {error && (
-            <p className="text-xs text-center" style={{ color: 'var(--lava-bright)' }}>
-              {error}
-            </p>
-          )}
+          {/* Inline error rendering moved to the top-level ErrorBanner. */}
           {disconnectedNote}
         </div>
       )}
@@ -847,12 +991,7 @@ export function TradePanel({
               : 'Sell'}
           </button>
 
-          {/* Inline error */}
-          {error && (
-            <p className="text-xs text-center" style={{ color: 'var(--lava-bright)' }}>
-              {error}
-            </p>
-          )}
+          {/* Inline error rendering moved to the top-level ErrorBanner. */}
           {disconnectedNote}
         </div>
       )}
