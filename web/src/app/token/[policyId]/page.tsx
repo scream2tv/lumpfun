@@ -6,7 +6,7 @@ import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
 import { VestingClaimPanel } from './vesting-claim';
 import { CreatorFeesPanel } from './fees-claim';
-import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance, fetchFeeAccumulatorBalance } from '@/lib/blockfrost';
+import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance, fetchFeeAccumulatorStats } from '@/lib/blockfrost';
 import { PriceChart } from './price-chart';
 import { TradesHolders } from './trades-holders';
 import { SocialLinks } from '@/lib/social-links';
@@ -79,11 +79,12 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
         vestingAddresses.map(addr => fetchVestingBalance(addr, assetUnit).catch(() => 0n)),
       )).reduce<bigint>((sum, b) => sum + (b ?? 0n), 0n);
 
-  // Creator fee accumulator balance (only set on tokens launched after the
-  // accumulator pattern shipped). Server-renders an initial value; the
+  // Creator fee accumulator stats (only set on tokens launched after the
+  // accumulator pattern shipped). Server-renders an initial split of
+  // unclaimed (still in script) vs claimed (already swept) lovelace; the
   // client panel polls every 15s for live updates as trades land.
-  const feeAccumulatorBalance = token.feeAccumulatorAddress
-    ? await fetchFeeAccumulatorBalance(token.feeAccumulatorAddress).catch(() => 0n)
+  const feeAccumulatorStats = token.feeAccumulatorAddress
+    ? await fetchFeeAccumulatorStats(token.feeAccumulatorAddress).catch(() => ({ unclaimed: 0n, claimed: 0n, lifetime: 0n }))
     : null;
 
   return (
@@ -174,7 +175,8 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
                 creatorAddress={token.creatorAddress}
                 feeAccumulatorAddress={token.feeAccumulatorAddress}
                 feeAccumulatorValidatorCbor={token.feeAccumulatorValidatorCbor}
-                initialBalance={(feeAccumulatorBalance ?? 0n).toString()}
+                initialUnclaimed={(feeAccumulatorStats?.unclaimed ?? 0n).toString()}
+                initialClaimed={(feeAccumulatorStats?.claimed ?? 0n).toString()}
                 initialClaimedTxHash={token.feeAccumulatorClaimedTxHash}
               />
             )}

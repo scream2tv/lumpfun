@@ -88,6 +88,31 @@ export async function fetchFeeAccumulatorBalance(feeAccumulatorAddress: string):
   return total;
 }
 
+// Lifetime accounting for a fee accumulator address. Blockfrost's
+// /addresses/{addr}/total endpoint returns received_sum and sent_sum across
+// all txs ever touching the address, so we can split current balance into
+// "still sitting in the script" (unclaimed) vs "already swept" (claimed)
+// without re-implementing tx-history pagination on the client.
+export async function fetchFeeAccumulatorStats(
+  feeAccumulatorAddress: string,
+): Promise<{ unclaimed: bigint; claimed: bigint; lifetime: bigint } | null> {
+  const totals = await bf(`/addresses/${feeAccumulatorAddress}/total`, { noStore: true }) as {
+    received_sum: Array<{ unit: string; quantity: string }>;
+    sent_sum:     Array<{ unit: string; quantity: string }>;
+  } | null;
+  if (!totals) {
+    // 404 means the address has never been used — accumulator is fresh.
+    return { unclaimed: 0n, claimed: 0n, lifetime: 0n };
+  }
+  const lifetime = BigInt(totals.received_sum.find(a => a.unit === 'lovelace')?.quantity ?? '0');
+  const sent     = BigInt(totals.sent_sum.find(a => a.unit === 'lovelace')?.quantity ?? '0');
+  return {
+    unclaimed: lifetime - sent,
+    claimed:   sent,
+    lifetime,
+  };
+}
+
 // Sum up how many of this token are currently locked at the vesting script
 // address. Returns 0n if nothing is locked (claim happened, or never vested).
 // Returns null if the lookup fails so the UI can hide the metric.

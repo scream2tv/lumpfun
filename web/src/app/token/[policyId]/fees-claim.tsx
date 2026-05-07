@@ -5,41 +5,32 @@ import { useQuery } from '@tanstack/react-query';
 import { useWallet } from '@/lib/wallet';
 import { txExplorerUrl } from '@/lib/utils';
 
-// Per-token "Creator fees" panel. Public-readable balance (anyone can see
-// what's accrued); claim button is creator-only. Polls the accumulator
-// address every 15s so trade activity reflects within seconds.
+// Per-token "Creator fees" panel. Public-readable balances (anyone can see
+// what's accrued and what's been swept); claim button is creator-only.
+// Polls /api/fee-accumulator every 15s so trade activity reflects within
+// seconds and "claimed" updates the moment a sweep tx confirms.
 
 interface Props {
-  policyId:                 string;
-  creatorAddress:           string;
-  feeAccumulatorAddress:    string;
+  policyId:                    string;
+  creatorAddress:              string;
+  feeAccumulatorAddress:       string;
   feeAccumulatorValidatorCbor: string;
-  initialBalance:           string; // bigint as string, server-rendered
-  initialClaimedTxHash?:    string;
+  initialUnclaimed:            string; // bigint as string
+  initialClaimed:              string; // bigint as string
+  initialClaimedTxHash?:       string;
 }
 
-async function fetchAccruedLovelace(address: string): Promise<string> {
-  const res = await fetch(
-    `/api/wallet-assets?address=${encodeURIComponent(address)}`,
-    { cache: 'no-store' },
-  );
-  if (!res.ok) return '0';
-  // /api/wallet-assets only returns non-ADA assets; we need the lovelace.
-  // Easiest is a small dedicated endpoint, but for now we can derive it
-  // from the on-chain bf call indirectly. Skip — the page server-renders
-  // the initial balance and we just refresh by triggering router.refresh.
-  return '0';
-}
+interface Stats { unclaimed: bigint; claimed: bigint }
 
-function fmtAda(lovelace: bigint): string {
+function fmtAda(lovelace: bigint, decimals = 3): string {
   const ada = Number(lovelace) / 1_000_000;
-  if (ada >= 1000)  return `${(ada / 1000).toFixed(2)}K ₳`;
-  if (ada >= 1)     return `${ada.toFixed(3)} ₳`;
+  if (ada >= 1000) return `${(ada / 1000).toFixed(2)}K ₳`;
+  if (ada >= 1)    return `${ada.toFixed(decimals)} ₳`;
   return `${ada.toFixed(4)} ₳`;
 }
 
 function extractErrorMessage(e: unknown): string {
-  if (e instanceof Error) return e.message.split('\n')[0].slice(0, 240);
+  if (e instanceof Error)   return e.message.split('\n')[0].slice(0, 240);
   if (typeof e === 'string') return e.split('\n')[0].slice(0, 240);
   if (e && typeof e === 'object') {
     const o = e as Record<string, unknown>;
@@ -59,52 +50,71 @@ export function CreatorFeesPanel(props: Props) {
   const { wallet, walletApi } = useWallet();
   const isCreator = wallet?.address === props.creatorAddress;
 
-  const { data: balanceStr = props.initialBalance } = useQuery({
+  const initial: Stats = {
+    unclaimed: BigInt(props.initialUnclaimed),
+    claimed:   BigInt(props.initialClaimed),
+  };
+
+  const { data: stats = initial } = useQuery<Stats>({
     queryKey: ['fee-accumulator', props.feeAccumulatorAddress],
-    queryFn:  async () => {
-      // Reuse the wallet-assets address path but only for lovelace; if that
-      // route doesn't expose lovelace we fall through to initialBalance.
-      try { await fetchAccruedLovelace(props.feeAccumulatorAddress); } catch { /* ignore */ }
-      return props.initialBalance;
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/fee-accumulator?address=${encodeURIComponent(props.feeAccumulatorAddress)}`,
+        { cache: 'no-store' },
+      );
+      if (!res.ok) return initial;
+      const json = await res.json() as { unclaimed: string; claimed: string };
+      return { unclaimed: BigInt(json.unclaimed), claimed: BigInt(json.claimed) };
     },
     refetchInterval: 15_000,
     refetchOnWindowFocus: true,
-    initialData: props.initialBalance,
+    initialData: initial,
   });
 
-  const balance = BigInt(balanceStr);
+  const lifetime = stats.unclaimed + stats.claimed;
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]           = useState<string | null>(null);
   const [txHash, setTxHash]         = useState<string | null>(props.initialClaimedTxHash ?? null);
 
-  // Public stat is always visible; the claim form only shows when the
-  // connected wallet matches the creator.
+  const hasUnclaimed = stats.unclaimed > 0n;
+  const hasActivity  = lifetime > 0n;
+
   return (
     <div
-      className="rounded-xl p-4 mb-3 flex flex-col gap-2"
+      className="rounded-xl p-4 mb-3 flex flex-col gap-3"
       style={{
-        background: balance > 0n ? 'rgba(92,224,210,0.06)' : 'var(--bg-card)',
-        border: `1px solid ${balance > 0n ? 'rgba(92,224,210,0.25)' : 'var(--border-mid)'}`,
+        background: hasUnclaimed ? 'rgba(92,224,210,0.06)' : 'var(--bg-card)',
+        border: `1px solid ${hasUnclaimed ? 'rgba(92,224,210,0.25)' : 'var(--border-mid)'}`,
       }}
     >
       <div className="flex items-baseline justify-between">
         <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
-          Creator fees collected
+          Creator fees
         </p>
-        <span
-          className="text-sm font-semibold tabular-nums"
-          style={{
-            color: balance > 0n ? 'var(--teal)' : 'var(--text)',
-            fontFamily: 'var(--font-jetbrains), monospace',
-          }}
-        >
-          {fmtAda(balance)}
-        </span>
+        {hasActivity && (
+          <span className="text-[11px]" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+            lifetime {fmtAda(lifetime, 2)}
+          </span>
+        )}
+      </div>
+
+      {/* Two-up split: unclaimed (highlighted) | claimed */}
+      <div className="grid grid-cols-2 gap-2">
+        <Stat
+          label="Unclaimed"
+          value={fmtAda(stats.unclaimed)}
+          tone={hasUnclaimed ? 'teal' : 'mute'}
+        />
+        <Stat
+          label="Claimed"
+          value={fmtAda(stats.claimed)}
+          tone="mute"
+        />
       </div>
 
       {txHash ? (
-        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-          Last claim:{' '}
+        <p className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+          Last sweep:{' '}
           <a
             href={txExplorerUrl(txHash)}
             target="_blank"
@@ -115,7 +125,7 @@ export function CreatorFeesPanel(props: Props) {
           </a>
         </p>
       ) : (
-        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+        <p className="text-[11px]" style={{ color: 'var(--text-dim)', lineHeight: 1.5 }}>
           Trades pay creator fees into a per-launch script. The creator can sweep at any time.
         </p>
       )}
@@ -150,24 +160,27 @@ export function CreatorFeesPanel(props: Props) {
                 setSubmitting(false);
               }
             }}
-            disabled={balance === 0n || submitting}
+            disabled={!hasUnclaimed || submitting}
             style={{
               height: 38,
               borderRadius: 'var(--r-md)',
               fontSize: 13,
               fontWeight: 600,
               fontFamily: 'var(--font-outfit)',
-              cursor: balance > 0n && !submitting ? 'pointer' : 'not-allowed',
-              border: balance > 0n ? 'none' : '1px solid var(--border-subtle)',
-              background: balance > 0n ? 'var(--teal)' : 'var(--bg-elevated)',
-              color: balance > 0n ? 'var(--bg-deep)' : 'var(--text-dim)',
-              boxShadow: balance > 0n && !submitting ? '0 0 14px rgba(92,224,210,0.32)' : 'none',
+              cursor: hasUnclaimed && !submitting ? 'pointer' : 'not-allowed',
+              border: hasUnclaimed ? 'none' : '1px solid var(--border-subtle)',
+              background: hasUnclaimed ? 'var(--teal)' : 'var(--bg-elevated)',
+              color: hasUnclaimed ? 'var(--bg-deep)' : 'var(--text-dim)',
+              boxShadow: hasUnclaimed && !submitting ? '0 0 14px rgba(92,224,210,0.32)' : 'none',
               opacity: submitting ? 0.7 : 1,
               transition: 'all 200ms',
-              marginTop: 4,
             }}
           >
-            {submitting ? 'Awaiting signature…' : balance > 0n ? `Claim ${fmtAda(balance)}` : 'Nothing to claim yet'}
+            {submitting
+              ? 'Awaiting signature…'
+              : hasUnclaimed
+                ? `Sweep ${fmtAda(stats.unclaimed)} to wallet`
+                : 'Nothing to sweep yet'}
           </button>
 
           {error && (
@@ -177,6 +190,31 @@ export function CreatorFeesPanel(props: Props) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone: 'teal' | 'mute' }) {
+  return (
+    <div
+      className="rounded-lg px-3 py-2 flex flex-col gap-0.5"
+      style={{
+        background: 'var(--bg-card)',
+        border: `1px solid ${tone === 'teal' ? 'rgba(92,224,210,0.35)' : 'var(--border-subtle)'}`,
+      }}
+    >
+      <span className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
+        {label}
+      </span>
+      <span
+        className="text-sm font-semibold tabular-nums"
+        style={{
+          color: tone === 'teal' ? 'var(--teal)' : 'var(--text)',
+          fontFamily: 'var(--font-jetbrains), monospace',
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }

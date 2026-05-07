@@ -1,52 +1,65 @@
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { TokenCard } from '@/components/token-card';
+import { BestOfBunker } from './best-of-bunker';
 import { fetchTokenList, fetchTokenInfo } from '@/lib/blockfrost';
 import type { SortMode, TokenInfo } from '@/lib/types';
 
-async function TokenGrid({ sort }: { sort: SortMode }) {
+async function loadTokens(): Promise<TokenInfo[]> {
   const list  = await fetchTokenList();
   const infos = await Promise.all(list.map(m => fetchTokenInfo(m)));
-  const tokens = infos.filter((t): t is TokenInfo => t !== null);
+  return infos.filter((t): t is TokenInfo => t !== null);
+}
 
-  const sorted =
-    sort === 'trending'
-      ? [...tokens].sort((a, b) => b.bondedPct - a.bondedPct)
-    : sort === 'graduating'
-      ? [...tokens].filter(t => t.bondedPct >= 80).sort((a, b) => b.bondedPct - a.bondedPct)
-    : [...tokens].sort((a, b) => new Date(b.launchedAt).getTime() - new Date(a.launchedAt).getTime());
+function sortTokens(tokens: TokenInfo[], sort: SortMode): TokenInfo[] {
+  if (sort === 'trending')
+    return [...tokens].sort((a, b) => b.bondedPct - a.bondedPct);
+  if (sort === 'graduating')
+    return [...tokens].filter(t => t.bondedPct >= 80).sort((a, b) => b.bondedPct - a.bondedPct);
+  return [...tokens].sort((a, b) => new Date(b.launchedAt).getTime() - new Date(a.launchedAt).getTime());
+}
 
-  if (sorted.length === 0) {
+async function FeedBody({ sort }: { sort: SortMode }) {
+  const tokens = await loadTokens();
+
+  if (tokens.length === 0) {
     return (
-      <div className="col-span-full flex flex-col items-center justify-center py-24 text-center">
-        <p className="text-base mb-6" style={{ color: 'var(--text-dim)' }}>
-          No tokens yet — be the first.
-        </p>
-        <Link
-          href="/create"
-          style={{
-            padding: '10px 24px',
-            background: 'var(--teal)',
-            color: 'var(--bg-deep)',
-            borderRadius: 10,
-            fontWeight: 600,
-            fontSize: 14,
-            fontFamily: 'var(--font-outfit)',
-            boxShadow: '0 0 24px rgba(92,224,210,0.4)',
-            textDecoration: 'none',
-          }}
-        >
-          Launch the first token →
-        </Link>
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+        <div className="col-span-full flex flex-col items-center justify-center py-24 text-center">
+          <p className="text-base mb-6" style={{ color: 'var(--text-dim)' }}>
+            No tokens yet — be the first.
+          </p>
+          <Link
+            href="/create"
+            style={{
+              padding: '10px 24px',
+              background: 'var(--teal)',
+              color: 'var(--bg-deep)',
+              borderRadius: 10,
+              fontWeight: 600,
+              fontSize: 14,
+              fontFamily: 'var(--font-outfit)',
+              boxShadow: '0 0 24px rgba(92,224,210,0.4)',
+              textDecoration: 'none',
+            }}
+          >
+            Launch the first token →
+          </Link>
+        </div>
       </div>
     );
   }
 
+  const sorted = sortTokens(tokens, sort);
+
   return (
     <>
-      {sorted.map(t => (
-        <TokenCard key={`${t.policyId}${t.assetName}`} token={t} />
-      ))}
+      <BestOfBunker tokens={tokens} />
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+        {sorted.map(t => (
+          <TokenCard key={`${t.policyId}${t.assetName}`} token={t} />
+        ))}
+      </div>
     </>
   );
 }
@@ -54,13 +67,19 @@ async function TokenGrid({ sort }: { sort: SortMode }) {
 function Skeleton() {
   return (
     <>
-      {Array.from({ length: 12 }).map((_, i) => (
-        <div
-          key={i}
-          className="animate-pulse rounded-xl"
-          style={{ height: 156, background: 'var(--bg-card)', border: '1px solid var(--border-subtle)' }}
-        />
-      ))}
+      <div
+        className="animate-pulse rounded-2xl mb-4"
+        style={{ height: 120, background: 'var(--bg-card)', border: '1px solid var(--border-subtle)' }}
+      />
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+        {Array.from({ length: 12 }).map((_, i) => (
+          <div
+            key={i}
+            className="animate-pulse rounded-xl"
+            style={{ height: 156, background: 'var(--bg-card)', border: '1px solid var(--border-subtle)' }}
+          />
+        ))}
+      </div>
     </>
   );
 }
@@ -134,12 +153,9 @@ export default async function HomePage({
         </Link>
       </div>
 
-      {/* Token grid — 2 cols on mobile, 3 on md, 4 on xl */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
-        <Suspense fallback={<Skeleton />}>
-          <TokenGrid sort={sortMode} />
-        </Suspense>
-      </div>
+      <Suspense fallback={<Skeleton />}>
+        <FeedBody sort={sortMode} />
+      </Suspense>
     </div>
   );
 }
