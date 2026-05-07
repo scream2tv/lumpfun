@@ -18,7 +18,7 @@ export default function AgentLandingPage() {
           fontFamily: 'var(--font-outfit)',
         }}
       >
-        Agent SDK · Coming Soon
+        Agent & Builder Surface · Live
       </div>
 
       <h1
@@ -59,26 +59,27 @@ export default function AgentLandingPage() {
           lineHeight: 1.7,
         }}
       >
-        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/tokens          <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// list every launched token</span></div>
-        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/curve           <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// live bonding-curve reserves</span></div>
-        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/price-history   <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// OHLC bars per interval</span></div>
-        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/holders         <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// per-token holder list</span></div>
-        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/trades          <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// recent trade flow</span></div>
-        <div><span style={{ color: 'var(--lava-bright)' }}>POST</span> /api/swap-back       <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// SDK-level Minswap V2 sell</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/tokens                  <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// list every launched token</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/token/&#123;policyId&#125;       <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// single-token snapshot + live curve</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/curve                   <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// live bonding-curve reserves</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/quote                   <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// buy/sell quote with fees + minOut</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/price-history           <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// OHLC bars per interval</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/holders                 <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// per-token holder list</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/trades                  <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// recent trade flow</span></div>
+        <div><span style={{ color: 'var(--teal)' }}>GET</span>  /api/wallet-assets           <span style={{ color: 'var(--text-dim)', opacity: 0.7 }}>// LumpFun token holdings for an address</span></div>
       </div>
 
       <p
         className="text-center max-w-xl mb-10 text-sm"
         style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-outfit)' }}
       >
-        Full SDK docs, agent prompts, and signed-tx examples are landing soon.
+        Endpoint reference, on-chain protocol details, and full Lucid
+        Evolution buy/sell tx walkthroughs live in <Link href="/docs" style={{ color: 'var(--teal)', textDecoration: 'underline' }}>/docs</Link>.
       </p>
 
-      <div className="flex gap-3">
+      <div className="flex gap-3 flex-wrap justify-center">
         <Link
-          href="/api/tokens"
-          target="_blank"
-          rel="noopener noreferrer"
+          href="/docs"
           style={{
             padding: '10px 22px',
             background: 'var(--lava-bright)',
@@ -91,10 +92,44 @@ export default function AgentLandingPage() {
             textDecoration: 'none',
           }}
         >
-          Try /api/tokens →
+          Read the docs →
         </Link>
         <Link
-          href="/"
+          href="/docs/api"
+          style={{
+            padding: '10px 22px',
+            background: 'transparent',
+            color: 'var(--text)',
+            border: '1px solid var(--border-mid)',
+            borderRadius: 10,
+            fontWeight: 600,
+            fontSize: 14,
+            fontFamily: 'var(--font-outfit)',
+            textDecoration: 'none',
+          }}
+        >
+          API reference
+        </Link>
+        <Link
+          href="/docs/protocol"
+          style={{
+            padding: '10px 22px',
+            background: 'transparent',
+            color: 'var(--text)',
+            border: '1px solid var(--border-mid)',
+            borderRadius: 10,
+            fontWeight: 600,
+            fontSize: 14,
+            fontFamily: 'var(--font-outfit)',
+            textDecoration: 'none',
+          }}
+        >
+          On-chain protocol
+        </Link>
+        <Link
+          href="/api/tokens"
+          target="_blank"
+          rel="noopener noreferrer"
           style={{
             padding: '10px 22px',
             background: 'transparent',
@@ -107,7 +142,7 @@ export default function AgentLandingPage() {
             textDecoration: 'none',
           }}
         >
-          ← Back
+          Try /api/tokens
         </Link>
       </div>
     </div>
