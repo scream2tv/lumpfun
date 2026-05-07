@@ -139,8 +139,32 @@ async function toBech32(addr: string): Promise<string> {
 
 // ── Error message mapper ──────────────────────────────────────────────────────
 
+// Extract a readable string from whatever the wallet / Lucid throws. CIP-30
+// errors (Vespr, Eternl, Lace) come back as { code, info } plain objects,
+// not Error instances, so the previous String(e) path gave "[object Object]".
+function rawErrorString(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  if (e && typeof e === 'object') {
+    const o = e as Record<string, unknown>;
+    // CIP-30: { code: number, info: string }
+    if (typeof o.info === 'string') {
+      const code = typeof o.code === 'number' ? ` (code ${o.code})` : '';
+      return `${o.info}${code}`;
+    }
+    if (typeof o.message === 'string') return o.message;
+    if (typeof o.cause === 'string')   return o.cause;
+    if (o.cause && typeof o.cause === 'object') {
+      const c = o.cause as Record<string, unknown>;
+      if (typeof c.message === 'string') return c.message;
+    }
+    try { return JSON.stringify(e); } catch { /* fallthrough */ }
+  }
+  return String(e);
+}
+
 function friendlyError(e: unknown, op: 'buy' | 'sell'): string {
-  const raw = e instanceof Error ? e.message : String(e);
+  const raw = rawErrorString(e);
   const m = raw.toLowerCase();
   // Pre-sign declines vary by wallet:
   //   Nami / Eternl     → "user declined" / "user rejected"
@@ -351,6 +375,7 @@ export function TradePanel({
       setBuyAda(''); setBuyChip(null);
       invalidateCurve();
     } catch (e) {
+      console.error('[trade] buy failed:', e);
       setError(friendlyError(e, 'buy'));
     } finally {
       setSubmitting(false);
@@ -394,6 +419,7 @@ export function TradePanel({
       setSellRaw(''); setSellPct(null);
       invalidateCurve();
     } catch (e) {
+      console.error('[trade] sell failed:', e);
       setError(friendlyError(e, 'sell'));
     } finally {
       setSubmitting(false);
