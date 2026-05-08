@@ -207,24 +207,36 @@ async function fetchCurve(token, lucid) {
 
 async function cmdInit(count) {
   count = Number(count) || 2;
+  const { network } = envConfig();
   const existing = await loadWallets();
-  if (existing.length > 0) {
-    console.log(`${existing.length} wallet(s) already exist. To regenerate, delete ${WALLETS_FILE}.\n`);
+
+  // Grow semantics: if N wallets already exist and the user asks for M,
+  // generate (M - N) more. Existing wallets keep their funded balances.
+  // To start fresh, delete .wallets.json first.
+  if (existing.length >= count) {
+    console.log(`${existing.length} wallet(s) already exist (asked for ${count}). Nothing to do.`);
+    console.log(`To start fresh, delete ${WALLETS_FILE} and re-run init.\n`);
     return cmdFaucet();
   }
-  const { network } = envConfig();
-  const wallets = [];
-  for (let i = 0; i < count; i++) {
+
+  const fresh = [];
+  for (let i = existing.length; i < count; i++) {
     const seed = generateSeedPhrase();
     const lucid = await lucidWith(seed);
     const address = await lucid.wallet().address();
-    wallets.push({ name: `test-${i}`, seed, address });
+    fresh.push({ name: `test-${i}`, seed, address });
   }
-  await saveWallets(wallets);
-  console.log(`Generated ${count} ${network} wallets. Stored at ${WALLETS_FILE}`);
-  console.log('\nFund each address from https://docs.cardano.org/cardano-testnet/tools/faucet:');
-  for (const w of wallets) console.log(`  ${w.name}  ${w.address}`);
-  console.log(`\nThen run:  node scripts/preprod-test/cli.mjs status`);
+  const all = [...existing, ...fresh];
+  await saveWallets(all);
+
+  if (existing.length === 0) {
+    console.log(`Generated ${fresh.length} ${network} wallets. Stored at ${WALLETS_FILE}`);
+  } else {
+    console.log(`Added ${fresh.length} ${network} wallet(s). Existing ${existing.length} preserved.`);
+  }
+  console.log('\nFund the new addresses from https://docs.cardano.org/cardano-testnet/tools/faucet:');
+  for (const w of fresh) console.log(`  ${w.name}  ${w.address}`);
+  console.log(`\nThen run:  npm run preprod -- status`);
 }
 
 async function cmdFaucet() {
@@ -301,6 +313,19 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
   const token = await pickToken(ticker);
   const { treasuryAddress } = envConfig();
   const lucid = await lucidWith(w.seed);
+
+  // Wait for the wallet's previous tx (if any) to confirm before
+  // submitting the next one. Without this, two back-to-back trades from
+  // the same wallet hit the Blockfrost cache window — Lucid's coin
+  // selection sees the stale UTxO set and either picks an already-spent
+  // input ("All inputs are spent") or doesn't see freshly-arrived tokens
+  // ("wallet does not have enough funds"). Awaiting flushes the race.
+  if (w.lastTxHash) {
+    process.stdout.write(`▶ ${w.name}  awaiting prev tx ${w.lastTxHash.slice(0, 12)}…  `);
+    try { await lucid.awaitTx(w.lastTxHash, 60_000); console.log('confirmed'); }
+    catch { console.log('still pending — proceeding anyway, may fail'); }
+  }
+
   const { adaReserve, tokenReserve } = await fetchCurve(token, lucid);
 
   // Default 5% on the test harness: a fresh preprod curve has tiny reserves
@@ -345,6 +370,14 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
   const signed = await tx.sign.withWallet().complete();
   const txHash = await signed.submit();
   console.log(`    locked  ${txHash}`);
+
+  // Persist the lock txHash on the wallet so the NEXT trade from this
+  // wallet can awaitTx before submitting (closes the Blockfrost-cache
+  // race that produces "All inputs are spent" / "no funds" on rapid
+  // back-to-back trades).
+  const all = await loadWallets();
+  const idx = all.findIndex(x => x.name === w.name);
+  if (idx >= 0) { all[idx].lastTxHash = txHash; await saveWallets(all); }
 
   // Kick the batcher tick — fire-and-forget so submitting many orders
   // back-to-back doesn't serialise on each tick's lucid.awaitTx loop. The
@@ -453,9 +486,18 @@ async function cmdCancel(walletIdx) {
   if (mine.length === 0) { console.log(`No pending orders for ${w.name}.`); return; }
   console.log(`▶ Cancelling ${mine.length} order(s) for ${w.name}`);
 
+  // Same await-prev guard as cmdTrade — a freshly-locked order isn't
+  // visible at order_book until its lock tx confirms; cancelling before
+  // confirmation produces a "no pending orders" no-op or, worse, a
+  // "all inputs are spent" race when both txs hit the same wallet UTxO.
+  if (w.lastTxHash) {
+    process.stdout.write(`  awaiting prev tx ${w.lastTxHash.slice(0, 12)}…  `);
+    try { await lucid.awaitTx(w.lastTxHash, 60_000); console.log('confirmed'); }
+    catch { console.log('still pending — proceeding anyway'); }
+  }
+
   const validator = await orderBookValidator();
-  // Cancel one tx per order (validator only requires owner sig + Cancel
-  // redeemer; could batch into one tx but leave that for later).
+  let lastCancelHash = null;
   for (const u of mine) {
     try {
       const tx = await lucid.newTx()
@@ -465,10 +507,17 @@ async function cmdCancel(walletIdx) {
         .complete();
       const signed = await tx.sign.withWallet().complete();
       const txHash = await signed.submit();
+      lastCancelHash = txHash;
       console.log(`    cancel  ${u.txHash.slice(0, 12)}…#${u.outputIndex}  →  ${txHash.slice(0, 12)}…`);
     } catch (e) {
       console.log(`    cancel  ${u.txHash.slice(0, 12)}…#${u.outputIndex}  ✗  ${e.message ?? e}`);
     }
+  }
+
+  if (lastCancelHash) {
+    const all = await loadWallets();
+    const idx = all.findIndex(x => x.name === w.name);
+    if (idx >= 0) { all[idx].lastTxHash = lastCancelHash; await saveWallets(all); }
   }
 }
 
