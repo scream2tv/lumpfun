@@ -68,29 +68,69 @@ export function rawErrorString(e: unknown): string {
 
 // Walk a few well-known nested-error fields looking for a CIP-30 shape
 // `{ code, info }` or a string message. Returns null if nothing useful.
+//
+// Effect-style classes (Lucid Evolution's TxSubmitError, TxSignerError,
+// TxBuilderError) hide the underlying wallet payload behind class slots
+// that aren't enumerable. We additionally walk Object.getOwnPropertyNames
+// to reach those.
 function probeNested(e: object): string | null {
-  const fields: Array<keyof typeof e | string> = ['cause', 'error', 'reason', 'data'];
+  const wellKnown = ['cause', 'error', 'reason', 'data', 'original', 'inner'];
+  for (const f of wellKnown) {
+    const v = (e as Record<string, unknown>)[f];
+    const m = matchCip30Like(v);
+    if (m) return m;
+  }
+  // Walk every own property — covers Effect's non-enumerable slots.
+  for (const name of Object.getOwnPropertyNames(e)) {
+    if (name === 'message' || name === 'stack' || name === 'name') continue;
+    const v = (e as Record<string, unknown>)[name];
+    const m = matchCip30Like(v);
+    if (m) return m;
+  }
+  // Top-level CIP-30 shape on the error object itself.
+  return matchCip30Like(e);
+}
+
+// Recognise a CIP-30 `{ code, info }` shape, a nested `cause` of one, or
+// a plain string message; return the rendered string if found.
+function matchCip30Like(v: unknown): string | null {
+  if (!v) return null;
+  if (typeof v === 'string') return v;
+  if (typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.info === 'string')   return `${o.code ?? ''} ${o.info}`.trim();
+  if (typeof o.message === 'string' && o.message !== '[object Object]') return o.message;
+  if (o.cause && typeof o.cause === 'object') {
+    const c = o.cause as Record<string, unknown>;
+    if (typeof c.info === 'string')   return `${c.code ?? ''} ${c.info}`.trim();
+    if (typeof c.message === 'string') return c.message;
+  }
+  return null;
+}
+
+// Pull a numeric `code` off the error or any of its nested error slots.
+// Used by the classifier to dispatch on CIP-30 numeric codes when the
+// info string alone is ambiguous.
+function pickCode(e: unknown): number | undefined {
+  if (!e || typeof e !== 'object') return undefined;
+  const direct = (e as { code?: unknown }).code;
+  if (typeof direct === 'number') return direct;
+  // Walk nested error slots one level deep.
+  const fields = ['cause', 'error', 'reason', 'data', 'original', 'inner'];
   for (const f of fields) {
     const v = (e as Record<string, unknown>)[f];
-    if (!v) continue;
-    if (typeof v === 'string')                                return v;
-    if (typeof v === 'object') {
-      const o = v as Record<string, unknown>;
-      if (typeof o.info    === 'string') return `${o.code ?? ''} ${o.info}`.trim();
-      if (typeof o.message === 'string' && o.message !== '[object Object]') return o.message as string;
-      // Recurse one level into nested cause chains.
-      if (o.cause && typeof o.cause === 'object') {
-        const c = o.cause as Record<string, unknown>;
-        if (typeof c.info    === 'string') return `${c.code ?? ''} ${c.info}`.trim();
-        if (typeof c.message === 'string') return c.message as string;
-      }
+    if (v && typeof v === 'object' && typeof (v as { code?: unknown }).code === 'number') {
+      return (v as { code: number }).code;
     }
   }
-  // Top-level CIP-30 shape on the error object itself (some wallets throw
-  // the plain object as the error).
-  const o = e as Record<string, unknown>;
-  if (typeof o.info === 'string') return `${o.code ?? ''} ${o.info}`.trim();
-  return null;
+  // Same walk over non-enumerable own properties.
+  for (const name of Object.getOwnPropertyNames(e)) {
+    const v = (e as Record<string, unknown>)[name];
+    if (v && typeof v === 'object' && typeof (v as { code?: unknown }).code === 'number') {
+      return (v as { code: number }).code;
+    }
+  }
+  return undefined;
 }
 
 // ── Classifier ────────────────────────────────────────────────────────────
@@ -102,16 +142,37 @@ export function classifyError(e: unknown): { code: TxErrorCode; state: FailureSt
   const raw = rawErrorString(e);
   const m   = raw.toLowerCase();
 
-  // CIP-30 numeric codes — Vespr returns these as { code: -2, info: "..." }
-  const code = (e && typeof e === 'object' && 'code' in (e as object))
-    ? (e as { code?: number }).code
-    : undefined;
-  if (code === -2 || /user (declined|rejected|cancel)/.test(m) || /declined to sign/.test(m))
-    return { code: 'USER_REJECTED',       state: 'user_cancelled', raw };
-  if (code === -3 || /wallet.*locked/.test(m))
+  // CIP-30 numeric codes:
+  //   APIError      : -1 InvalidRequest, -2 InternalError, -3 Refused, -4 AccountChange
+  //   TxSignError   : 1 ProofGeneration, 2 UserDeclined
+  //   TxSendError   : 1 Refused,          2 Failure
+  // Read whichever is on the throwable. Vespr/Eternl/Lace all surface
+  // their wallet-side rejection as `info` strings, so we additionally
+  // string-match — the numeric `code` alone is not enough to tell user
+  // rejection apart from a generic wallet hiccup.
+  const code = pickCode(e);
+
+  // User rejection. POSITIVE code 2 (TxSignError.UserDeclined) is the
+  // canonical signal; we also accept the english variants. Negative -2
+  // is APIError.InternalError, NOT a rejection — handled below.
+  if (
+    /user (declined|rejected|cancel)/.test(m) ||
+    /declined to sign/.test(m) ||
+    /transaction declined/.test(m) ||
+    code === 2
+  ) return { code: 'USER_REJECTED',       state: 'user_cancelled', raw };
+
+  if (code === -3 || /wallet.*locked|refused/.test(m))
     return { code: 'WALLET_LOCKED',       state: 'retry_safe',     raw };
   if (/no used addresses|wallet not enabled|not connected/.test(m))
     return { code: 'WALLET_DISCONNECTED', state: 'retry_safe',     raw };
+
+  // CIP-30 APIError.InternalError — wallet's own submit endpoint failed
+  // for an opaque reason. Most often: wallet just lost network context,
+  // tx is malformed for the wallet's submit node, or a transient hiccup.
+  // Retry-safe (no auto-retry — root cause is unknown to us).
+  if (code === -2 || /error occurred during execution of this api call/i.test(m))
+    return { code: 'INTERNAL_ERROR',      state: 'retry_safe',     raw };
 
   // Validator + UTxO race (specific phrases first — the BadInputs check
   // overlaps with generic submit failures, so we anchor on tokens).
