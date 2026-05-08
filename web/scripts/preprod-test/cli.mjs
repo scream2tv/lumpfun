@@ -293,7 +293,7 @@ async function cmdStatus() {
   }
 }
 
-async function cmdTrade(walletIdx, action, amount, ticker) {
+async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
   const wallets = await loadWallets();
   const w = wallets[Number(walletIdx)];
   if (!w) throw new Error(`No wallet at index ${walletIdx}. Have: ${wallets.map((x, i) => `${i}=${x.name}`).join(', ')}`);
@@ -303,7 +303,12 @@ async function cmdTrade(walletIdx, action, amount, ticker) {
   const lucid = await lucidWith(w.seed);
   const { adaReserve, tokenReserve } = await fetchCurve(token, lucid);
 
-  const SLIPPAGE_BPS = 50n;
+  // Default 5% on the test harness: a fresh preprod curve has tiny reserves
+  // so a single neighbouring trade moves price by tens of percent. The web
+  // app uses 0.5% which is correct for mature mainnet curves but way too
+  // tight for batched preprod testing — orders silently skip on slippage
+  // and just sit at the order_book.
+  const SLIPPAGE_BPS = slippageBpsArg ? BigInt(slippageBpsArg) : 500n;
   const ownerPkh    = pkhFromBech32(w.address);
   const creatorPkh  = pkhFromBech32(token.creatorAddress);
   const treasuryPkh = pkhFromBech32(treasuryAddress);
@@ -341,19 +346,15 @@ async function cmdTrade(walletIdx, action, amount, ticker) {
   const txHash = await signed.submit();
   console.log(`    locked  ${txHash}`);
 
-  // Kick the batcher tick (idempotent — will short-circuit if a tick is in-flight).
-  try {
-    const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
-    if (r.ok) {
-      const j = await r.json();
-      console.log(`    batcher  processed=${j.ordersProcessed ?? 0}  skipped=${j.ordersSkipped ?? 0}  errors=${j.errors ?? 0}`);
-    } else {
-      console.log(`    batcher  /api/orders → ${r.status} (npm run dev not running?)`);
-    }
-  } catch { console.log(`    batcher  /api/orders unreachable`); }
+  // Kick the batcher tick — fire-and-forget so submitting many orders
+  // back-to-back doesn't serialise on each tick's lucid.awaitTx loop. The
+  // user can run `tick` or `wait <i>` afterward to see the actual batcher
+  // outcome.
+  fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+  console.log(`    batcher  kicked (fire-and-forget — run \`wait ${walletIdx}\` to follow)`);
 }
 
-async function cmdBurst(walletCount, adaEach, ticker) {
+async function cmdBurst(walletCount, adaEach, ticker, slippageBpsArg) {
   walletCount = Number(walletCount) || 2;
   const adaArg = adaEach ?? 25;
   const wallets = (await loadWallets()).slice(0, walletCount);
@@ -361,7 +362,7 @@ async function cmdBurst(walletCount, adaEach, ticker) {
 
   console.log(`▶ Burst: ${walletCount} concurrent BUY orders × ${adaArg} tADA each`);
   const t0 = Date.now();
-  const results = await Promise.allSettled(wallets.map((_, i) => cmdTrade(i, 'buy', adaArg, ticker)));
+  const results = await Promise.allSettled(wallets.map((_, i) => cmdTrade(i, 'buy', adaArg, ticker, slippageBpsArg)));
   console.log(`\n▶ Burst submitted in ${Date.now() - t0} ms`);
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
@@ -407,10 +408,24 @@ async function cmdWait(walletIdx, timeoutSec = 90) {
       console.log(`✓ all settled (${((Date.now() - start) / 1000).toFixed(1)}s)`);
       return;
     }
-    console.log(`  ${mine.length} still pending… (${((Date.now() - start) / 1000).toFixed(0)}s)`);
-    // Kick the batcher each iteration so we don't sit waiting on a cron
-    // that doesn't fire locally.
-    await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' }).catch(() => {});
+
+    // Kick + capture the batcher's response so we can see WHY orders
+    // aren't draining (slippage skip, validator error, etc.). Without
+    // this the wait loop is opaque.
+    let tickSummary = 'tick unreachable';
+    try {
+      const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
+      if (r.ok) {
+        const j = await r.json();
+        tickSummary = `tried=${j.tokensTried ?? 0} processed=${j.ordersProcessed ?? 0} skipped=${j.ordersSkipped ?? 0} errors=${j.errors ?? 0}`;
+        if (j.sink === 'queue-off') tickSummary = '⚠ NEXT_PUBLIC_USE_QUEUE!=1 — batcher is gated off';
+      } else {
+        tickSummary = `/api/orders → ${r.status}`;
+      }
+    } catch (e) {
+      tickSummary = `/api/orders unreachable: ${e.message ?? e}`;
+    }
+    console.log(`  ${mine.length} still pending… (${((Date.now() - start) / 1000).toFixed(0)}s)  [${tickSummary}]`);
     await new Promise(r => setTimeout(r, 10_000));
   }
   console.log(`✗ timeout after ${timeoutSec}s — pending orders still present. Run \`status\` for detail.`);
@@ -464,9 +479,9 @@ const HELP = `Preprod batcher test harness.
   init [count]                 Generate wallets (default 2). Stores seed phrases in .wallets.json
   faucet                       Print the wallet addresses to fund
   status                       Show every wallet's tADA, token holdings, pending orders
-  trade <i> buy  <ada>  [tkr]  Submit a BUY order  from wallet i for <ada> tADA
-  trade <i> sell <tokens> [tkr] Submit a SELL order from wallet i for <tokens> raw units
-  burst <count> [adaEach] [tkr] Submit <count> concurrent BUYs from wallets 0..count-1
+  trade <i> buy  <ada>  [tkr] [slippageBps]   Submit BUY  from wallet i (default slippage 500 bps = 5%)
+  trade <i> sell <tokens> [tkr] [slippageBps] Submit SELL from wallet i (raw token units)
+  burst <count> [adaEach] [tkr] [slippageBps] Submit <count> concurrent BUYs from wallets 0..count-1
   tick                         Kick the batcher (cron doesn't fire under \`next dev\`)
   wait <i> [seconds]           Block until wallet i's pending orders all drain (default 90s)
   cancel <i>                   Cancel every pending order owned by wallet i
@@ -479,8 +494,8 @@ async function main() {
     case 'init':   await cmdInit(args[0]); break;
     case 'faucet': await cmdFaucet(); break;
     case 'status': await cmdStatus(); break;
-    case 'trade':  await cmdTrade(args[0], args[1], args[2], args[3]); break;
-    case 'burst':  await cmdBurst(args[0], args[1], args[2]); break;
+    case 'trade':  await cmdTrade(args[0], args[1], args[2], args[3], args[4]); break;
+    case 'burst':  await cmdBurst(args[0], args[1], args[2], args[3]); break;
     case 'tick':   await cmdTick(); break;
     case 'wait':   await cmdWait(args[0], Number(args[1]) || 90); break;
     case 'cancel': await cmdCancel(args[0]); break;
