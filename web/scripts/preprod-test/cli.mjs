@@ -369,6 +369,53 @@ async function cmdBurst(walletCount, adaEach, ticker) {
   }
 }
 
+async function cmdTick() {
+  // Vercel cron only runs on deployed Vercel projects, not on `next dev`.
+  // Use this to manually drain whatever's pending. Idempotent — the
+  // server-side tickInFlight guard collapses concurrent triggers.
+  try {
+    const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
+    if (!r.ok) { console.log(`/api/orders → ${r.status}. Is npm run dev running?`); return; }
+    const j = await r.json();
+    console.log(`tokensTried=${j.tokensTried ?? 0}  tokensWithOrders=${j.tokensWithOrders ?? 0}  processed=${j.ordersProcessed ?? 0}  skipped=${j.ordersSkipped ?? 0}  errors=${j.errors ?? 0}`);
+    for (const t of (j.byToken ?? [])) {
+      console.log(`  ${t.ticker}: processed=${t.processed} skipped=${t.skipped} errors=${t.errors}`);
+    }
+  } catch (e) { console.log(`/api/orders unreachable: ${e.message ?? e}`); }
+}
+
+async function cmdWait(walletIdx, timeoutSec = 90) {
+  // Poll until the wallet's pending orders are all gone (or timeout).
+  // Useful after a trade or burst — tells you when the batcher actually
+  // settled the orders without you having to spam `status`.
+  const wallets = await loadWallets();
+  const w = wallets[Number(walletIdx)];
+  if (!w) throw new Error(`No wallet at index ${walletIdx}.`);
+  const lucid = await lucidWith();
+  const obAddr = await orderBookAddr();
+  const ownerPkh = pkhFromBech32(w.address);
+  const start = Date.now();
+  console.log(`▶ Waiting up to ${timeoutSec}s for ${w.name} pending orders to drain…`);
+  while (Date.now() - start < timeoutSec * 1000) {
+    const all = await lucid.utxosAt(obAddr).catch(() => []);
+    const mine = all.filter(u => {
+      if (!u.datum) return false;
+      try { return decodeOrderDatum(u.datum).ownerPkh === ownerPkh; }
+      catch { return false; }
+    });
+    if (mine.length === 0) {
+      console.log(`✓ all settled (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+      return;
+    }
+    console.log(`  ${mine.length} still pending… (${((Date.now() - start) / 1000).toFixed(0)}s)`);
+    // Kick the batcher each iteration so we don't sit waiting on a cron
+    // that doesn't fire locally.
+    await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' }).catch(() => {});
+    await new Promise(r => setTimeout(r, 10_000));
+  }
+  console.log(`✗ timeout after ${timeoutSec}s — pending orders still present. Run \`status\` for detail.`);
+}
+
 async function cmdCancel(walletIdx) {
   const wallets = await loadWallets();
   const w = wallets[Number(walletIdx)];
@@ -420,6 +467,8 @@ const HELP = `Preprod batcher test harness.
   trade <i> buy  <ada>  [tkr]  Submit a BUY order  from wallet i for <ada> tADA
   trade <i> sell <tokens> [tkr] Submit a SELL order from wallet i for <tokens> raw units
   burst <count> [adaEach] [tkr] Submit <count> concurrent BUYs from wallets 0..count-1
+  tick                         Kick the batcher (cron doesn't fire under \`next dev\`)
+  wait <i> [seconds]           Block until wallet i's pending orders all drain (default 90s)
   cancel <i>                   Cancel every pending order owned by wallet i
 `;
 
@@ -432,6 +481,8 @@ async function main() {
     case 'status': await cmdStatus(); break;
     case 'trade':  await cmdTrade(args[0], args[1], args[2], args[3]); break;
     case 'burst':  await cmdBurst(args[0], args[1], args[2]); break;
+    case 'tick':   await cmdTick(); break;
+    case 'wait':   await cmdWait(args[0], Number(args[1]) || 90); break;
     case 'cancel': await cmdCancel(args[0]); break;
     case 'help':
     case '--help':
