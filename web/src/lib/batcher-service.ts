@@ -15,7 +15,6 @@ import 'server-only';
 import {
   Lucid as LucidEv,
   Blockfrost as BlockfrostEv,
-  applyDoubleCborEncoding,
   Constr,
   type LucidEvolution,
   type UTxO as UTxOEv,
@@ -124,13 +123,18 @@ async function fetchCurveUtxoForToken(
 }
 
 // ── Per-token bonding-curve validator (parameterised) ──────────────────────
-// Mirrors the construction in cardano-tx.ts but server-side: we pull the
-// already-applied CBOR straight from the registry rather than re-applying.
+// meta.validatorCbor is already the parameterised, ready-to-attach CBOR
+// (produced at launch time via applyDoubleCborEncoding+applyParamsToScript
+// and stored in the registry). The direct path (cardano-tx.ts) attaches
+// it as-is — we must do the same here, otherwise we double-wrap the
+// envelope and Lucid sees a different script hash than the curve UTxO's
+// address, producing "TranslationLogicMissingInput" + ValueNotConserved
+// failures at submit time.
 
 function curveValidator(meta: TokenMeta) {
   return {
     type:   'PlutusV3' as const,
-    script: applyDoubleCborEncoding(meta.validatorCbor),
+    script: meta.validatorCbor,
   };
 }
 
