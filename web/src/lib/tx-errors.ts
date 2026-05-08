@@ -91,8 +91,9 @@ function probeNested(e: object): string | null {
   return matchCip30Like(e);
 }
 
-// Recognise a CIP-30 `{ code, info }` shape, a nested `cause` of one, or
-// a plain string message; return the rendered string if found.
+// Recognise a CIP-30 `{ code, info }` shape, a nested `cause` of one, an
+// Effect Cause tagged union, or a plain string message. Return the
+// rendered string if found.
 function matchCip30Like(v: unknown): string | null {
   if (!v) return null;
   if (typeof v === 'string') return v;
@@ -100,35 +101,51 @@ function matchCip30Like(v: unknown): string | null {
   const o = v as Record<string, unknown>;
   if (typeof o.info === 'string')   return `${o.code ?? ''} ${o.info}`.trim();
   if (typeof o.message === 'string' && o.message !== '[object Object]') return o.message;
+
+  // Effect Cause<E> tagged union — Lucid Evolution wraps wallet errors as
+  // FiberFailureError whose .cause is one of these. The shape is documented
+  // in @effect/io: Fail | Die | Sequential | Parallel | Empty | Interrupt.
+  switch (o._tag) {
+    case 'Fail':       return matchCip30Like(o.error);
+    case 'Die':        return matchCip30Like(o.defect);
+    case 'Sequential':
+    case 'Parallel':   return matchCip30Like(o.left) ?? matchCip30Like(o.right);
+  }
+
   if (o.cause && typeof o.cause === 'object') {
-    const c = o.cause as Record<string, unknown>;
-    if (typeof c.info === 'string')   return `${c.code ?? ''} ${c.info}`.trim();
-    if (typeof c.message === 'string') return c.message;
+    return matchCip30Like(o.cause);
   }
   return null;
 }
 
 // Pull a numeric `code` off the error or any of its nested error slots.
 // Used by the classifier to dispatch on CIP-30 numeric codes when the
-// info string alone is ambiguous.
-function pickCode(e: unknown): number | undefined {
-  if (!e || typeof e !== 'object') return undefined;
-  const direct = (e as { code?: unknown }).code;
-  if (typeof direct === 'number') return direct;
-  // Walk nested error slots one level deep.
-  const fields = ['cause', 'error', 'reason', 'data', 'original', 'inner'];
-  for (const f of fields) {
+// info string alone is ambiguous. Walks the same Effect Cause shape as
+// matchCip30Like so FiberFailureError is reachable.
+function pickCode(e: unknown, depth = 0): number | undefined {
+  if (depth > 5 || !e || typeof e !== 'object') return undefined;
+  const o = e as Record<string, unknown>;
+  if (typeof o.code === 'number') return o.code;
+
+  // Effect Cause walk.
+  switch (o._tag) {
+    case 'Fail':       return pickCode(o.error,  depth + 1);
+    case 'Die':        return pickCode(o.defect, depth + 1);
+    case 'Sequential':
+    case 'Parallel':   return pickCode(o.left, depth + 1) ?? pickCode(o.right, depth + 1);
+  }
+
+  // Well-known nested error slots.
+  for (const f of ['cause', 'error', 'reason', 'data', 'original', 'inner']) {
     const v = (e as Record<string, unknown>)[f];
-    if (v && typeof v === 'object' && typeof (v as { code?: unknown }).code === 'number') {
-      return (v as { code: number }).code;
-    }
+    const c = pickCode(v, depth + 1);
+    if (typeof c === 'number') return c;
   }
   // Same walk over non-enumerable own properties.
   for (const name of Object.getOwnPropertyNames(e)) {
-    const v = (e as Record<string, unknown>)[name];
-    if (v && typeof v === 'object' && typeof (v as { code?: unknown }).code === 'number') {
-      return (v as { code: number }).code;
-    }
+    if (name === 'message' || name === 'stack' || name === 'name') continue;
+    const c = pickCode((e as Record<string, unknown>)[name], depth + 1);
+    if (typeof c === 'number') return c;
   }
   return undefined;
 }
@@ -162,9 +179,20 @@ export function classifyError(e: unknown): { code: TxErrorCode; state: FailureSt
     code === 2
   ) return { code: 'USER_REJECTED',       state: 'user_cancelled', raw };
 
-  if (code === -3 || /wallet.*locked|refused/.test(m))
+  // CIP-30 APIError.Refused is `-3`. Vespr's info field tells us whether
+  // it's "wallet locked" (PIN expired, user has to unlock) or "wallet
+  // disconnected" (dApp lost authorization, user has to re-approve from
+  // the wallet's connected-dApps list). Both are retry-safe but the CTA
+  // and copy differ.
+  if (code === -3) {
+    if (/disconnect|lack of access|not authorized|authoriz/i.test(m)) {
+      return { code: 'WALLET_DISCONNECTED', state: 'retry_safe', raw };
+    }
+    return { code: 'WALLET_LOCKED', state: 'retry_safe', raw };
+  }
+  if (/wallet.*locked/.test(m))
     return { code: 'WALLET_LOCKED',       state: 'retry_safe',     raw };
-  if (/no used addresses|wallet not enabled|not connected/.test(m))
+  if (/no used addresses|wallet not enabled|not connected|refused/.test(m))
     return { code: 'WALLET_DISCONNECTED', state: 'retry_safe',     raw };
 
   // CIP-30 APIError.InternalError — wallet's own submit endpoint failed

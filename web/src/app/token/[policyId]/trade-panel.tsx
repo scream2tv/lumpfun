@@ -226,18 +226,27 @@ function useTxConfirmation(
 // Queue-mode acknowledgement banner. The lock tx itself confirms within
 // ~20 s (it's a plain payment to the order_book script) but the *trade*
 // hasn't settled yet — the batcher has to drain the order. We deliberately
-// do not run the tx-status poller here so the user doesn't see "Transaction
-// confirmed" and assume the trade is done. PendingOrders below is the
-// source of truth for queue state — when a row disappears, the order has
-// either settled or been cancelled.
-function QueuedBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) {
+// do not run the tx-status poller here so the user doesn't see
+// "Transaction confirmed" and assume the trade is done. The Cancel button
+// here is the immediate escape hatch — saves users scrolling to the
+// PendingOrders list (which only repopulates on the next 15 s tick).
+function QueuedBanner({
+  hash, onCancel, onDismiss,
+}: {
+  hash:      string;
+  onCancel:  () => Promise<void> | void;
+  onDismiss: () => void;
+}) {
   const explorerUrl = txExplorerUrl(hash);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelErr,  setCancelErr]  = useState<string | null>(null);
+
   return (
     <div
       className="rounded-lg p-3 flex items-start justify-between gap-2"
       style={{ background: 'rgba(92, 224, 210, 0.08)', border: '1px solid rgba(92, 224, 210, 0.25)' }}
     >
-      <div className="flex flex-col gap-0.5 min-w-0">
+      <div className="flex flex-col gap-1 min-w-0 flex-1">
         <p className="text-xs font-semibold" style={{ color: 'var(--teal)' }}>
           Order queued
           <span className="ml-1.5" style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· awaiting batcher</span>
@@ -252,8 +261,41 @@ function QueuedBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void
           {hash.slice(0, 16)}…{hash.slice(-8)}
         </a>
         <p className="text-[11px] mt-1" style={{ color: 'var(--text-dim)', lineHeight: 1.45 }}>
-          See <strong>Pending orders</strong> below — your tokens will land within ~30–60 s. Cancel any time before the batcher drains.
+          Tokens will land within ~30–60 s. Cancel any time before the batcher drains it.
         </p>
+        <div className="flex gap-2 mt-1.5">
+          <button
+            type="button"
+            disabled={cancelling}
+            onClick={async () => {
+              setCancelling(true);
+              setCancelErr(null);
+              try {
+                await onCancel();
+              } catch (e) {
+                setCancelErr(e instanceof Error ? e.message : String(e));
+              } finally {
+                setCancelling(false);
+              }
+            }}
+            className="text-xs font-semibold rounded-md"
+            style={{
+              padding: '5px 12px',
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border-mid)',
+              color: cancelling ? 'var(--text-dim)' : 'var(--text)',
+              cursor: cancelling ? 'not-allowed' : 'pointer',
+              fontFamily: 'var(--font-outfit)',
+            }}
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel order'}
+          </button>
+        </div>
+        {cancelErr && (
+          <p className="text-[11px] mt-1" style={{ color: 'var(--lava-bright)' }}>
+            {cancelErr}
+          </p>
+        )}
       </div>
       <button
         onClick={onDismiss}
@@ -639,6 +681,12 @@ export function TradePanel({
       lastAttemptRef.current = { op, startedAt, attempt, txHash: res.txHash, amount };
       setOutcome({ state: 'success', txHash: res.txHash });
       invalidateCurve();
+      // Queue mode: refresh the pending-orders list immediately so the
+      // user sees their order without waiting for the 15 s polling tick.
+      // Direct mode skips this — there's no queue to refresh.
+      if (QUEUE_ON) {
+        queryClient.invalidateQueries({ queryKey: ['pending-orders'] });
+      }
     } catch (e) {
       const cls = classifyError(e);
       let result: TxOutcome;
@@ -816,7 +864,18 @@ export function TradePanel({
         />
       )}
       {outcome?.state === 'success' && QUEUE_ON && (
-        <QueuedBanner hash={outcome.txHash} onDismiss={() => setOutcome(null)} />
+        <QueuedBanner
+          hash={outcome.txHash}
+          onCancel={async () => {
+            if (!walletApi) return;
+            const { cancelOrder } = await import('@/lib/order-tx');
+            // submit*Order always parks the order at output index 0.
+            await cancelOrder(walletApi, { txHash: outcome.txHash, outputIndex: 0 });
+            queryClient.invalidateQueries({ queryKey: ['pending-orders'] });
+            setOutcome(null);
+          }}
+          onDismiss={() => setOutcome(null)}
+        />
       )}
       {outcome && outcome.state !== 'success' && (
         <ErrorBanner
