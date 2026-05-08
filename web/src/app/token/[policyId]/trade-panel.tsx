@@ -13,6 +13,9 @@ import {
 
 const PLATFORM_FEE = 1_000_000n;
 const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
+// Queue mode is a per-deployment switch; module-scope so render and
+// runTrade read the same value without a closure dance.
+const QUEUE_ON = process.env.NEXT_PUBLIC_USE_QUEUE === '1';
 const BF_URL   = process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet'
   ? 'https://cardano-mainnet.blockfrost.io/api/v0'
   : 'https://cardano-preprod.blockfrost.io/api/v0';
@@ -220,6 +223,49 @@ function useTxConfirmation(
   return state;
 }
 
+// Queue-mode acknowledgement banner. The lock tx itself confirms within
+// ~20 s (it's a plain payment to the order_book script) but the *trade*
+// hasn't settled yet — the batcher has to drain the order. We deliberately
+// do not run the tx-status poller here so the user doesn't see "Transaction
+// confirmed" and assume the trade is done. PendingOrders below is the
+// source of truth for queue state — when a row disappears, the order has
+// either settled or been cancelled.
+function QueuedBanner({ hash, onDismiss }: { hash: string; onDismiss: () => void }) {
+  const explorerUrl = txExplorerUrl(hash);
+  return (
+    <div
+      className="rounded-lg p-3 flex items-start justify-between gap-2"
+      style={{ background: 'rgba(92, 224, 210, 0.08)', border: '1px solid rgba(92, 224, 210, 0.25)' }}
+    >
+      <div className="flex flex-col gap-0.5 min-w-0">
+        <p className="text-xs font-semibold" style={{ color: 'var(--teal)' }}>
+          Order queued
+          <span className="ml-1.5" style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· awaiting batcher</span>
+        </p>
+        <a
+          href={explorerUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs truncate"
+          style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}
+        >
+          {hash.slice(0, 16)}…{hash.slice(-8)}
+        </a>
+        <p className="text-[11px] mt-1" style={{ color: 'var(--text-dim)', lineHeight: 1.45 }}>
+          See <strong>Pending orders</strong> below — your tokens will land within ~30–60 s. Cancel any time before the batcher drains.
+        </p>
+      </div>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        style={{ color: 'var(--text-dim)', fontSize: 16, lineHeight: 1, cursor: 'pointer', background: 'none', border: 'none', flexShrink: 0 }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 function TxBanner({
   hash, onDismiss, onTerminal,
 }: {
@@ -401,6 +447,7 @@ export function TradePanel({
     startedAt: number;
     attempt:   number;
     txHash:    string;
+    amount:    bigint;
   } | null>(null);
 
   // ── Derived values ──────────────────────────────────────────────────────────
@@ -504,9 +551,14 @@ export function TradePanel({
     if (!TREASURY) {
       const out: TxOutcome = { state: 'contact_support', code: 'CONFIG_ERROR', raw: 'NEXT_PUBLIC_TREASURY_ADDRESS missing' };
       setOutcome(out);
-      finalizeLog({ op, attempt, startedAt: Date.now(), result: out });
+      finalizeLog({ op, attempt, amount: 0n, startedAt: Date.now(), result: out });
       return;
     }
+
+    // Snapshot the trade amount up-front. setBuyAda('') / setSellRaw('')
+    // run after a successful submit, which would otherwise leave the
+    // confirmation-time finalizeLog reading 0 from the closure.
+    const amount = op === 'buy' ? buyAdaL : sellUnits;
 
     const startedAt = Date.now();
     if (attempt === 1) { setSubmitting(true); setOutcome(null); }
@@ -529,10 +581,9 @@ export function TradePanel({
       // instead of consuming the curve directly. Off in production; the
       // only way to enable it is to set NEXT_PUBLIC_USE_QUEUE=1 on the
       // preprod / dev deploy.
-      const queueOn = process.env.NEXT_PUBLIC_USE_QUEUE === '1';
       if (op === 'buy') {
         if (!buyAdaL) return;
-        if (queueOn) {
+        if (QUEUE_ON) {
           const { submitBuyOrder } = await import('@/lib/order-tx');
           res = await submitBuyOrder(walletApi, {
             policyId, assetName, curveAddress,
@@ -558,7 +609,7 @@ export function TradePanel({
         setBuyAda(''); setBuyChip(null);
       } else {
         if (!sellUnits) return;
-        if (queueOn) {
+        if (QUEUE_ON) {
           const { submitSellOrder } = await import('@/lib/order-tx');
           res = await submitSellOrder(walletApi, {
             policyId, assetName, curveAddress,
@@ -585,7 +636,7 @@ export function TradePanel({
       // Submit accepted. Park correlation for the post-submit poller so it
       // can emit the terminal log with confirmedAfterMs once /api/tx-status
       // resolves (or the 120 s window expires → TX_OUTRACED).
-      lastAttemptRef.current = { op, startedAt, attempt, txHash: res.txHash };
+      lastAttemptRef.current = { op, startedAt, attempt, txHash: res.txHash, amount };
       setOutcome({ state: 'success', txHash: res.txHash });
       invalidateCurve();
     } catch (e) {
@@ -608,7 +659,7 @@ export function TradePanel({
 
       console.error(`[trade] ${op} failed:`, e);
       setOutcome(result);
-      finalizeLog({ op, attempt, startedAt, result, errorRaw: cls.raw });
+      finalizeLog({ op, attempt, amount, startedAt, result, errorRaw: cls.raw });
     } finally {
       setSubmitting(false);
     }
@@ -617,6 +668,7 @@ export function TradePanel({
   function finalizeLog(args: {
     op: 'buy' | 'sell';
     attempt: number;
+    amount: bigint;             // snapshotted at runTrade entry, immune to setBuyAda('') closure staleness
     startedAt: number;
     result: TxOutcome;
     errorRaw?: string;
@@ -629,8 +681,8 @@ export function TradePanel({
       assetUnit,
       walletName:         wallet?.name ?? 'unknown',
       network:            (process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod'),
-      adaIn:              args.op === 'buy'  ? buyAdaL.toString()  : undefined,
-      tokensIn:           args.op === 'sell' ? sellUnits.toString() : undefined,
+      adaIn:              args.op === 'buy'  ? args.amount.toString() : undefined,
+      tokensIn:           args.op === 'sell' ? args.amount.toString() : undefined,
       curveAdaReserve:    curve?.adaReserve.toString(),
       curveTokenReserve:  curve?.tokenReserve.toString(),
       creatorFeeBps,
@@ -657,6 +709,7 @@ export function TradePanel({
       finalizeLog({
         op:               ctx.op,
         attempt:          ctx.attempt,
+        amount:           ctx.amount,
         startedAt:        ctx.startedAt,
         result:           { state: 'success', txHash: ctx.txHash },
         confirmedAfterMs: elapsedMs,
@@ -667,6 +720,7 @@ export function TradePanel({
       finalizeLog({
         op:        ctx.op,
         attempt:   ctx.attempt,
+        amount:    ctx.amount,
         startedAt: ctx.startedAt,
         result:    out,
         errorRaw:  out.raw,
@@ -748,17 +802,21 @@ export function TradePanel({
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-mid)' }}
     >
       {/* Outcome banner — exactly one of:
-            success           → TxBanner (polls /api/tx-status until confirmed/outraced)
-            user_cancelled    → soft cancel notice
-            retry_safe        → red banner + Retry/Reconnect CTA
-            contact_support   → red banner + Report CTA
-          The poller's terminal callback re-emits `outcome` if it ages into TX_OUTRACED. */}
-      {outcome?.state === 'success' && (
+            success (direct mode)     → TxBanner (polls /api/tx-status until confirmed/outraced)
+            success (queue mode)      → QueuedBanner (no poller; PendingOrders panel is source of truth)
+            user_cancelled            → soft cancel notice
+            retry_safe                → red banner + Retry/Reconnect CTA
+            contact_support           → red banner + Report CTA
+          In direct mode the poller's terminal callback re-emits `outcome` if it ages into TX_OUTRACED. */}
+      {outcome?.state === 'success' && !QUEUE_ON && (
         <TxBanner
           hash={outcome.txHash}
           onDismiss={() => setOutcome(null)}
           onTerminal={handleTxTerminal}
         />
+      )}
+      {outcome?.state === 'success' && QUEUE_ON && (
+        <QueuedBanner hash={outcome.txHash} onDismiss={() => setOutcome(null)} />
       )}
       {outcome && outcome.state !== 'success' && (
         <ErrorBanner

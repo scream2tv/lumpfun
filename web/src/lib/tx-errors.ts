@@ -38,21 +38,59 @@ export type TxOutcome =
 // instances) on Vespr/Eternl/Lace, so a naive String(e) yields "[object
 // Object]". This collapses every shape we've seen into a string suitable
 // for both classification and logging.
+//
+// Special-cased: Lucid Evolution wraps wallet errors as Effect-style
+// classes (TxSubmitError, TxSignerError, …) where `.message` is the
+// String(originalError) of the CIP-30 payload — i.e. literally "[object
+// Object]". The real `{ code, info }` is parked under .cause / .error /
+// the original Effect tag. We probe those before falling back to message.
 export function rawErrorString(e: unknown): string {
-  if (e instanceof Error)   return e.message;
+  // Try a chain of nested-error fields in priority order. CIP-30 plain
+  // objects, Effect's `.cause`, Lucid's `.error` (some throw classes use
+  // a non-standard field), and our own previously-flattened messages.
+  if (e instanceof Error) {
+    const probed = probeNested(e);
+    if (probed) return probed;
+    if (e.message && e.message !== '[object Object]') return e.message;
+    // Last resort: dump own properties so a future failure isn't opaque.
+    try { return JSON.stringify(e, Object.getOwnPropertyNames(e)).slice(0, 1024); }
+    catch { /* fallthrough */ }
+    return e.message ?? String(e);
+  }
   if (typeof e === 'string') return e;
   if (e && typeof e === 'object') {
-    const o = e as Record<string, unknown>;
-    if (typeof o.info    === 'string') return `${o.code ?? ''} ${o.info}`.trim();
-    if (typeof o.message === 'string') return o.message;
-    if (typeof o.cause   === 'string') return o.cause;
-    if (o.cause && typeof o.cause === 'object') {
-      const c = o.cause as Record<string, unknown>;
-      if (typeof c.message === 'string') return c.message;
-    }
+    const probed = probeNested(e);
+    if (probed) return probed;
     try { return JSON.stringify(e); } catch { /* fallthrough */ }
   }
   return String(e);
+}
+
+// Walk a few well-known nested-error fields looking for a CIP-30 shape
+// `{ code, info }` or a string message. Returns null if nothing useful.
+function probeNested(e: object): string | null {
+  const fields: Array<keyof typeof e | string> = ['cause', 'error', 'reason', 'data'];
+  for (const f of fields) {
+    const v = (e as Record<string, unknown>)[f];
+    if (!v) continue;
+    if (typeof v === 'string')                                return v;
+    if (typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      if (typeof o.info    === 'string') return `${o.code ?? ''} ${o.info}`.trim();
+      if (typeof o.message === 'string' && o.message !== '[object Object]') return o.message as string;
+      // Recurse one level into nested cause chains.
+      if (o.cause && typeof o.cause === 'object') {
+        const c = o.cause as Record<string, unknown>;
+        if (typeof c.info    === 'string') return `${c.code ?? ''} ${c.info}`.trim();
+        if (typeof c.message === 'string') return c.message as string;
+      }
+    }
+  }
+  // Top-level CIP-30 shape on the error object itself (some wallets throw
+  // the plain object as the error).
+  const o = e as Record<string, unknown>;
+  if (typeof o.info === 'string') return `${o.code ?? ''} ${o.info}`.trim();
+  return null;
 }
 
 // ── Classifier ────────────────────────────────────────────────────────────

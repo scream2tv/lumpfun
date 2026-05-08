@@ -154,10 +154,17 @@ export function PendingOrders({
                 setCancellingRef(ref);
                 try {
                   await cancelOrder(walletApi, { txHash: o.txHash, outputIndex: o.outputIndex });
-                  queryClient.invalidateQueries({ queryKey: ['pending-orders'] });
                 } catch (e) {
+                  // Some wallets (Vespr in particular) throw post-submit
+                  // even when the cancel tx actually landed. Surface the
+                  // error but still refetch — if the cancel really did
+                  // submit, the next /api/order-book-utxos poll will see
+                  // the order gone and the row will disappear naturally.
+                  // If it truly failed, the row stays and the user can
+                  // retry without a stale-UI restart.
                   console.error('[pending-orders] cancel failed:', e);
                 } finally {
+                  queryClient.invalidateQueries({ queryKey: ['pending-orders'] });
                   setCancellingRef(null);
                 }
               }}
