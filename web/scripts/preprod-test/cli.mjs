@@ -328,12 +328,16 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
 
   const { adaReserve, tokenReserve } = await fetchCurve(token, lucid);
 
-  // Default 5% on the test harness: a fresh preprod curve has tiny reserves
-  // so a single neighbouring trade moves price by tens of percent. The web
-  // app uses 0.5% which is correct for mature mainnet curves but way too
-  // tight for batched preprod testing — orders silently skip on slippage
-  // and just sit at the order_book.
-  const SLIPPAGE_BPS = slippageBpsArg ? BigInt(slippageBpsArg) : 500n;
+  // Slippage tolerance grows with burst size: each FIFO-queued order
+  // ahead of yours moves the curve, so the order's minOut (set against
+  // submission-time reserves) accumulates lag against execution-time
+  // reserves. Empirically, a 5-order burst of 10 tADA on a fresh
+  // ~2 tADA curve drives the *last* order ~7.5% below its quote. 10%
+  // gives headroom up through 5–6 orders; bump explicitly for larger
+  // bursts. The web app's 0.5% only works because real users issue
+  // single trades against mature mainnet curves where compounding
+  // queue impact doesn't apply.
+  const SLIPPAGE_BPS = slippageBpsArg ? BigInt(slippageBpsArg) : 1000n;
   const ownerPkh    = pkhFromBech32(w.address);
   const creatorPkh  = pkhFromBech32(token.creatorAddress);
   const treasuryPkh = pkhFromBech32(treasuryAddress);
@@ -564,9 +568,9 @@ const HELP = `Preprod batcher test harness.
   init [count]                 Generate wallets (default 2). Stores seed phrases in .wallets.json
   faucet                       Print the wallet addresses to fund
   status                       Show every wallet's tADA, token holdings, pending orders
-  trade <i> buy  <ada>  [tkr] [slippageBps]   Submit BUY  from wallet i (default slippage 500 bps = 5%)
-  trade <i> sell <tokens> [tkr] [slippageBps] Submit SELL from wallet i (raw token units)
-  burst <count> [adaEach] [tkr] [slippageBps] Submit <count> concurrent BUYs from wallets 0..count-1
+  trade <i> buy  <ada>  [tkr] [slippageBps]   BUY  from wallet i (default 1000 bps = 10%)
+  trade <i> sell <tokens> [tkr] [slippageBps] SELL from wallet i (raw token units)
+  burst <count> [adaEach] [tkr] [slippageBps] <count> concurrent BUYs (bump bps for >5 orders)
   tick                         Kick the batcher (cron doesn't fire under \`next dev\`)
   wait <i> [seconds]           Block until wallet i's pending orders all drain (default 90s)
   wait-all [seconds]           Block until every wallet's orders drain (default 180s)
