@@ -90,4 +90,8 @@ export interface WalletInfo {
   address: string;
   lovelace: bigint;
   name: string;
+  /** Payment-credential hash (hex) derived from `address`. Cached on the
+   *  wallet object so the queue-mode UI can match the wallet against
+   *  OrderDatum.ownerPkh without re-deriving on every render. */
+  pkh: string;
 }

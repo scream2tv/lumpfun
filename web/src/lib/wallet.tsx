@@ -140,8 +140,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         lovelace = typeof parsed === 'bigint' ? parsed : 0n;
       } catch { /* ignore */ }
 
+      // Derive payment-credential hash from the bech32 address. Used by the
+      // queue-mode UI to match wallet → pending-order ownership without a
+      // round-trip. Lazy-imported so the bech32-only fast path stays clean.
+      let pkh = '';
+      if (address.startsWith('addr')) {
+        try {
+          const { getAddressDetails } = await import('@lucid-evolution/lucid');
+          pkh = getAddressDetails(address).paymentCredential?.hash ?? '';
+        } catch { /* leave empty — queue UI will hide */ }
+      }
+
       setWalletApi(api);
-      setWallet({ address, lovelace, name: cardano[walletKey].name });
+      setWallet({ address, lovelace, name: cardano[walletKey].name, pkh });
       localStorage.setItem(LAST_WALLET_KEY, walletKey);
     } finally {
       setConnecting(false);

@@ -6,6 +6,7 @@ import { CopyButton } from '@/components/copy-button';
 import { TradePanel } from './trade-panel';
 import { VestingClaimPanel } from './vesting-claim';
 import { CreatorFeesPanel } from './fees-claim';
+import { PendingOrders } from './pending-orders';
 import { fetchTokenList, fetchTokenInfo, fetchHolderCount, fetchVestingBalance, fetchFeeAccumulatorStats } from '@/lib/blockfrost';
 import { PriceChart } from './price-chart';
 import { TradesHolders } from './trades-holders';
@@ -231,6 +232,15 @@ async function TokenDetail({ policyId, assetName }: { policyId: string; assetNam
               ticker={token.ticker}
               creatorFeeBps={token.creatorFeeBps}
               feeAccumulatorAddress={token.feeAccumulatorAddress}
+            />
+
+            {/* Queue mode only — hidden when NEXT_PUBLIC_USE_QUEUE is unset.
+                Lists this wallet's pending orders for this token with an
+                owner-signed Cancel button as the escape hatch. */}
+            <PendingOrders
+              policyId={token.policyId}
+              assetName={token.assetName}
+              ticker={token.ticker}
             />
           </div>
         </div>

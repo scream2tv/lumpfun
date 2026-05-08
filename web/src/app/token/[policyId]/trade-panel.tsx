@@ -525,23 +525,60 @@ export function TradePanel({
       ]);
 
       let res: { txHash: string };
+      // Queue mode: lock an OrderDatum UTxO at the order_book validator
+      // instead of consuming the curve directly. Off in production; the
+      // only way to enable it is to set NEXT_PUBLIC_USE_QUEUE=1 on the
+      // preprod / dev deploy.
+      const queueOn = process.env.NEXT_PUBLIC_USE_QUEUE === '1';
       if (op === 'buy') {
         if (!buyAdaL) return;
-        const { buyTokens } = await import('@/lib/cardano-tx');
-        res = await buyTokens(
-          walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
-          policyId, assetName, curveAddress, validatorCbor,
-          treasuryBech32, creatorBech32, feeAccumulatorAddress,
-        );
+        if (queueOn) {
+          const { submitBuyOrder } = await import('@/lib/order-tx');
+          res = await submitBuyOrder(walletApi, {
+            policyId, assetName, curveAddress,
+            creatorAddress: creatorBech32,
+            treasuryAddress: treasuryBech32,
+            creatorFeeBps,
+            adaIn:        buyAdaL,
+            slippageBps:  DEFAULT_SLIPPAGE_BPS,
+            adaReserve:   curve.adaReserve,
+            tokenReserve: curve.tokenReserve,
+          });
+          // Kick the batcher so the user sees settlement on the next
+          // block instead of waiting up to ~60 s for the cron.
+          void fetch('/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+        } else {
+          const { buyTokens } = await import('@/lib/cardano-tx');
+          res = await buyTokens(
+            walletApi, snapshot, buyAdaL, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
+            policyId, assetName, curveAddress, validatorCbor,
+            treasuryBech32, creatorBech32, feeAccumulatorAddress,
+          );
+        }
         setBuyAda(''); setBuyChip(null);
       } else {
         if (!sellUnits) return;
-        const { sellTokens } = await import('@/lib/cardano-tx');
-        res = await sellTokens(
-          walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
-          policyId, assetName, curveAddress, validatorCbor,
-          treasuryBech32, creatorBech32, feeAccumulatorAddress,
-        );
+        if (queueOn) {
+          const { submitSellOrder } = await import('@/lib/order-tx');
+          res = await submitSellOrder(walletApi, {
+            policyId, assetName, curveAddress,
+            creatorAddress: creatorBech32,
+            treasuryAddress: treasuryBech32,
+            creatorFeeBps,
+            tokensIn:     sellUnits,
+            slippageBps:  DEFAULT_SLIPPAGE_BPS,
+            adaReserve:   curve.adaReserve,
+            tokenReserve: curve.tokenReserve,
+          });
+          void fetch('/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+        } else {
+          const { sellTokens } = await import('@/lib/cardano-tx');
+          res = await sellTokens(
+            walletApi, snapshot, sellUnits, DEFAULT_SLIPPAGE_BPS, creatorFeeBps,
+            policyId, assetName, curveAddress, validatorCbor,
+            treasuryBech32, creatorBech32, feeAccumulatorAddress,
+          );
+        }
         setSellRaw(''); setSellPct(null);
       }
 
