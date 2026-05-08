@@ -464,6 +464,42 @@ async function cmdWait(walletIdx, timeoutSec = 90) {
   console.log(`✗ timeout after ${timeoutSec}s — pending orders still present. Run \`status\` for detail.`);
 }
 
+async function cmdWaitAll(timeoutSec = 180) {
+  // Block until every wallet's pending orders drain. Useful after a
+  // burst — kicks the batcher each loop and reports global progress
+  // so you don't have to chain N backgrounded `wait` invocations.
+  const wallets = await loadWallets();
+  if (wallets.length === 0) { console.log('No wallets.'); return; }
+  const lucid = await lucidWith();
+  const obAddr = await orderBookAddr();
+  const ownerPkhs = new Set(wallets.map(w => pkhFromBech32(w.address)));
+  const start = Date.now();
+  console.log(`▶ Waiting up to ${timeoutSec}s for ${wallets.length} wallets' orders to drain…`);
+  while (Date.now() - start < timeoutSec * 1000) {
+    const all = await lucid.utxosAt(obAddr).catch(() => []);
+    const mine = all.filter(u => {
+      if (!u.datum) return false;
+      try { return ownerPkhs.has(decodeOrderDatum(u.datum).ownerPkh); }
+      catch { return false; }
+    });
+    if (mine.length === 0) {
+      console.log(`✓ all settled across ${wallets.length} wallets (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+      return;
+    }
+    let tickSummary = 'tick unreachable';
+    try {
+      const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
+      if (r.ok) {
+        const j = await r.json();
+        tickSummary = `tried=${j.tokensTried ?? 0} processed=${j.ordersProcessed ?? 0} skipped=${j.ordersSkipped ?? 0} errors=${j.errors ?? 0}`;
+      }
+    } catch { /* swallow */ }
+    console.log(`  ${mine.length} still pending across all wallets… (${((Date.now() - start) / 1000).toFixed(0)}s)  [${tickSummary}]`);
+    await new Promise(r => setTimeout(r, 10_000));
+  }
+  console.log(`✗ timeout after ${timeoutSec}s. Run \`status\` for detail.`);
+}
+
 async function cmdCancel(walletIdx) {
   const wallets = await loadWallets();
   const w = wallets[Number(walletIdx)];
@@ -533,6 +569,7 @@ const HELP = `Preprod batcher test harness.
   burst <count> [adaEach] [tkr] [slippageBps] Submit <count> concurrent BUYs from wallets 0..count-1
   tick                         Kick the batcher (cron doesn't fire under \`next dev\`)
   wait <i> [seconds]           Block until wallet i's pending orders all drain (default 90s)
+  wait-all [seconds]           Block until every wallet's orders drain (default 180s)
   cancel <i>                   Cancel every pending order owned by wallet i
 `;
 
@@ -547,6 +584,7 @@ async function main() {
     case 'burst':  await cmdBurst(args[0], args[1], args[2], args[3]); break;
     case 'tick':   await cmdTick(); break;
     case 'wait':   await cmdWait(args[0], Number(args[1]) || 90); break;
+    case 'wait-all': await cmdWaitAll(Number(args[0]) || 180); break;
     case 'cancel': await cmdCancel(args[0]); break;
     case 'help':
     case '--help':
