@@ -1,0 +1,449 @@
+#!/usr/bin/env node
+// Preprod batcher test harness — generates seeded wallets, drives buy/sell
+// orders via the queue path directly, kicks the batcher tick, and reports
+// status. Bypasses the browser UI / Vespr entirely so we can script
+// arbitrary trade scenarios.
+//
+// Wallets are persisted in .wallets.json (gitignored) alongside this file.
+// Seeds are plaintext — preprod-only, never reuse on mainnet.
+//
+// Usage examples:
+//   node scripts/preprod-test/cli.mjs init 2
+//   node scripts/preprod-test/cli.mjs status
+//   node scripts/preprod-test/cli.mjs trade 0 buy 50
+//   node scripts/preprod-test/cli.mjs trade 1 sell 1000000
+//   node scripts/preprod-test/cli.mjs burst 5 25
+//   node scripts/preprod-test/cli.mjs cancel 0
+//   node scripts/preprod-test/cli.mjs faucet            # prints the addresses to fund
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+
+import {
+  Lucid as LucidFn,
+  Blockfrost as BlockfrostProvider,
+  Constr, Data,
+  generateSeedPhrase,
+  getAddressDetails,
+  validatorToAddress,
+} from '@lucid-evolution/lucid';
+
+// ── Paths ─────────────────────────────────────────────────────────────────
+
+const __filename   = fileURLToPath(import.meta.url);
+const __dirname    = path.dirname(__filename);
+const WEB_ROOT     = path.resolve(__dirname, '..', '..');
+const WALLETS_FILE = path.join(__dirname, '.wallets.json');
+
+// ── Env loader ────────────────────────────────────────────────────────────
+// Reads web/.env.local with no extra dependencies. Mirrors Next.js's lax
+// parse: ignores comments, strips quotes, allows leading whitespace
+// (.env.local in this repo has indented keys).
+
+async function loadEnv() {
+  const envPath = path.join(WEB_ROOT, '.env.local');
+  let txt;
+  try { txt = await fs.readFile(envPath, 'utf8'); }
+  catch { throw new Error(`web/.env.local not found at ${envPath}`); }
+  for (const line of txt.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const m = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let value = m[2].trim();
+    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    process.env[m[1]] ??= value;
+  }
+}
+
+// ── Network / provider config ─────────────────────────────────────────────
+
+function envConfig() {
+  const network = (process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? 'Preprod') === 'Mainnet'
+    ? 'Mainnet' : 'Preprod';
+  const projectId = process.env.BLOCKFROST_PROJECT_ID
+                 ?? process.env.NEXT_PUBLIC_BLOCKFROST_PROJECT_ID
+                 ?? '';
+  const baseUrl = process.env.BLOCKFROST_BASE_URL
+               ?? (network === 'Mainnet'
+                    ? 'https://cardano-mainnet.blockfrost.io/api/v0'
+                    : 'https://cardano-preprod.blockfrost.io/api/v0');
+  const treasuryAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
+  if (network === 'Mainnet') {
+    throw new Error('preprod-test refuses to run on Mainnet. Check NEXT_PUBLIC_CARDANO_NETWORK.');
+  }
+  if (!projectId)       throw new Error('BLOCKFROST_PROJECT_ID not set in web/.env.local');
+  if (!treasuryAddress) throw new Error('NEXT_PUBLIC_TREASURY_ADDRESS not set in web/.env.local');
+  return { network, projectId, baseUrl, treasuryAddress };
+}
+
+async function lucidWith(seed) {
+  const { network, projectId, baseUrl } = envConfig();
+  const lucid = await LucidFn(new BlockfrostProvider(baseUrl, projectId), network);
+  if (seed) lucid.selectWallet.fromSeed(seed);
+  return lucid;
+}
+
+// ── Order-book script (mirror of web/src/lib/order-book.ts) ───────────────
+
+const ORDER_BOOK_CBOR = '59010601010029800aba2aba1aab9faab9eaab9dab9a48888896600264653001300700198039804000cc01c0092225980099b8748008c01cdd500144c8cc8a60022b30013001300a375400513259800980118059baa0078a51899198008009bac300f30103010301030103010301030103010300d375400c44b30010018a508acc004cdc79bae3010001375c6020601c6ea800e29462660040046022002806100f2014300d300b3754005164025300a375400d300d003488966002600800515980098071baa009801c5900f456600266e1d20020028acc004c038dd5004c00e2c807a2c806100c0c02cc030004dc3a400060106ea800a2c8030600e00260066ea801e29344d9590011';
+
+async function orderBookValidator() {
+  const { applyDoubleCborEncoding } = await import('@lucid-evolution/lucid');
+  return { type: 'PlutusV3', script: applyDoubleCborEncoding(ORDER_BOOK_CBOR) };
+}
+
+async function orderBookAddr() {
+  const { network } = envConfig();
+  return validatorToAddress(network, await orderBookValidator());
+}
+
+// ── Plutus codecs (mirror of web/src/lib/order-codec.ts) ──────────────────
+
+const PLATFORM_FEE      = 1_000_000n;
+const MIN_UTXO_LOVELACE = 2_000_000n;
+const VIRTUAL_ADA       = 3_000_000_000n;
+
+function encodeOrderDatum(d) {
+  const action = d.action === 'Buy' ? new Constr(0, []) : new Constr(1, []);
+  return Data.to(new Constr(0, [
+    d.ownerPkh, d.curvePolicyId, d.curveAssetName,
+    action, d.amount, d.minOut, d.creatorPkh, d.treasuryPkh,
+  ]));
+}
+
+function decodeOrderDatum(raw) {
+  const c = Data.from(raw);
+  if (c.index !== 0 || c.fields.length !== 8) throw new Error('bad order datum');
+  return {
+    ownerPkh:       c.fields[0],
+    curvePolicyId:  c.fields[1],
+    curveAssetName: c.fields[2],
+    action:         c.fields[3].index === 0 ? 'Buy' : 'Sell',
+    amount:         c.fields[4],
+    minOut:         c.fields[5],
+    creatorPkh:     c.fields[6],
+    treasuryPkh:    c.fields[7],
+  };
+}
+
+function encodeOrderRedeemerCancel() {
+  return Data.to(new Constr(1, []));
+}
+
+// ── Curve math (mirror of web/src/lib/curve-math.ts) ──────────────────────
+
+function quoteBuy(adaReserve, tokenReserve, adaIn) {
+  const effective = adaReserve + VIRTUAL_ADA;
+  const k = effective * tokenReserve;
+  const newEffective = effective + adaIn;
+  const newTokenReserve = k / newEffective;
+  return tokenReserve - newTokenReserve;
+}
+
+function quoteSellGross(adaReserve, tokenReserve, tokensIn) {
+  const effective = adaReserve + VIRTUAL_ADA;
+  const k = effective * tokenReserve;
+  const newTokenReserve = tokenReserve + tokensIn;
+  const newEffective = k / newTokenReserve;
+  const gross = effective - newEffective;
+  return gross > adaReserve ? adaReserve : gross;
+}
+
+function pkhFromBech32(addr) {
+  const d = getAddressDetails(addr);
+  if (!d.paymentCredential?.hash) throw new Error(`No payment credential for ${addr.slice(0, 12)}…`);
+  return d.paymentCredential.hash;
+}
+
+// ── Wallet persistence ────────────────────────────────────────────────────
+
+async function loadWallets() {
+  try {
+    const raw = await fs.readFile(WALLETS_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    throw e;
+  }
+}
+
+async function saveWallets(wallets) {
+  await fs.writeFile(WALLETS_FILE, JSON.stringify(wallets, null, 2));
+}
+
+// ── Token discovery ───────────────────────────────────────────────────────
+
+async function fetchTokens(devOrigin = 'http://localhost:3000') {
+  const res = await fetch(`${devOrigin}/api/tokens`);
+  if (!res.ok) throw new Error(`/api/tokens → ${res.status}. Is npm run dev running?`);
+  return res.json();
+}
+
+async function pickToken(ticker) {
+  const all = await fetchTokens();
+  const active = all.filter(t => !t.minswapPoolTxHash && !t.graduatedTxHash);
+  if (ticker) {
+    const m = active.find(t => t.ticker === ticker);
+    if (!m) throw new Error(`No active token with ticker '${ticker}'. Available: ${active.map(t => t.ticker).join(', ') || '(none)'}`);
+    return m;
+  }
+  if (active.length === 0) throw new Error('No active (non-graduated) tokens in the registry');
+  return active[0];
+}
+
+async function fetchCurve(token, lucid) {
+  const utxos = await lucid.utxosAt(token.curveAddress);
+  const assetUnit = `${token.policyId}${token.assetName}`;
+  const u = utxos.find(x => x.assets[assetUnit] !== undefined);
+  if (!u || !u.datum) throw new Error(`Curve UTxO not found at ${token.curveAddress.slice(0, 16)}…`);
+  const c = Data.from(u.datum);
+  return { adaReserve: c.fields[0], tokenReserve: c.fields[1] };
+}
+
+// ── Subcommands ───────────────────────────────────────────────────────────
+
+async function cmdInit(count) {
+  count = Number(count) || 2;
+  const existing = await loadWallets();
+  if (existing.length > 0) {
+    console.log(`${existing.length} wallet(s) already exist. To regenerate, delete ${WALLETS_FILE}.\n`);
+    return cmdFaucet();
+  }
+  const { network } = envConfig();
+  const wallets = [];
+  for (let i = 0; i < count; i++) {
+    const seed = generateSeedPhrase();
+    const lucid = await lucidWith(seed);
+    const address = await lucid.wallet().address();
+    wallets.push({ name: `test-${i}`, seed, address });
+  }
+  await saveWallets(wallets);
+  console.log(`Generated ${count} ${network} wallets. Stored at ${WALLETS_FILE}`);
+  console.log('\nFund each address from https://docs.cardano.org/cardano-testnet/tools/faucet:');
+  for (const w of wallets) console.log(`  ${w.name}  ${w.address}`);
+  console.log(`\nThen run:  node scripts/preprod-test/cli.mjs status`);
+}
+
+async function cmdFaucet() {
+  const wallets = await loadWallets();
+  if (wallets.length === 0) {
+    console.log('No wallets yet. Run `init <count>` first.');
+    return;
+  }
+  console.log('Fund these addresses from https://docs.cardano.org/cardano-testnet/tools/faucet :');
+  for (const w of wallets) console.log(`  ${w.name}  ${w.address}`);
+}
+
+async function cmdStatus() {
+  const wallets = await loadWallets();
+  if (wallets.length === 0) { console.log('No wallets. Run `init <count>` first.'); return; }
+
+  const lucid = await lucidWith();
+  const obAddr = await orderBookAddr();
+  const allOrders = await lucid.utxosAt(obAddr).catch(() => []);
+
+  console.log(`Order book : ${obAddr}`);
+  console.log(`Pending overall: ${allOrders.length}\n`);
+
+  const tokens = await fetchTokens();
+  const tokenByPolicy = new Map(tokens.map(t => [`${t.policyId}${t.assetName}`, t]));
+
+  for (const w of wallets) {
+    const utxos = await lucid.utxosAt(w.address).catch(() => []);
+    const lovelace = utxos.reduce((s, u) => s + (u.assets.lovelace ?? 0n), 0n);
+
+    // Sum non-ADA assets, group by unit
+    const tokensHeld = new Map();
+    for (const u of utxos) {
+      for (const [unit, qty] of Object.entries(u.assets)) {
+        if (unit === 'lovelace') continue;
+        tokensHeld.set(unit, (tokensHeld.get(unit) ?? 0n) + qty);
+      }
+    }
+
+    // Pending orders for this wallet
+    const ownerPkh = pkhFromBech32(w.address);
+    const myOrders = [];
+    for (const u of allOrders) {
+      if (!u.datum) continue;
+      try {
+        const d = decodeOrderDatum(u.datum);
+        if (d.ownerPkh === ownerPkh) myOrders.push({ utxo: u, datum: d });
+      } catch { /* skip unrecognised */ }
+    }
+
+    console.log(`▶ ${w.name}  ${w.address.slice(0, 18)}…${w.address.slice(-6)}`);
+    console.log(`    ${(Number(lovelace) / 1_000_000).toFixed(2)} tADA  •  ${utxos.length} UTxO${utxos.length === 1 ? '' : 's'}  •  ${myOrders.length} pending order${myOrders.length === 1 ? '' : 's'}`);
+    for (const [unit, qty] of tokensHeld) {
+      const meta = tokenByPolicy.get(unit);
+      const label = meta ? `$${meta.ticker}` : `${unit.slice(0, 16)}…`;
+      console.log(`      ${label}: ${Number(qty).toLocaleString()}`);
+    }
+    for (const o of myOrders) {
+      const meta = tokenByPolicy.get(`${o.datum.curvePolicyId}${o.datum.curveAssetName}`);
+      const ticker = meta?.ticker ?? '(unknown)';
+      const amt = o.datum.action === 'Buy'
+        ? `${(Number(o.datum.amount) / 1_000_000).toFixed(2)} tADA`
+        : `${Number(o.datum.amount).toLocaleString()} $${ticker}`;
+      console.log(`      ${o.datum.action.toUpperCase()} ${amt} → $${ticker}    ${o.utxo.txHash.slice(0, 12)}…#${o.utxo.outputIndex}`);
+    }
+  }
+}
+
+async function cmdTrade(walletIdx, action, amount, ticker) {
+  const wallets = await loadWallets();
+  const w = wallets[Number(walletIdx)];
+  if (!w) throw new Error(`No wallet at index ${walletIdx}. Have: ${wallets.map((x, i) => `${i}=${x.name}`).join(', ')}`);
+
+  const token = await pickToken(ticker);
+  const { treasuryAddress } = envConfig();
+  const lucid = await lucidWith(w.seed);
+  const { adaReserve, tokenReserve } = await fetchCurve(token, lucid);
+
+  const SLIPPAGE_BPS = 50n;
+  const ownerPkh    = pkhFromBech32(w.address);
+  const creatorPkh  = pkhFromBech32(token.creatorAddress);
+  const treasuryPkh = pkhFromBech32(treasuryAddress);
+  const obAddr      = await orderBookAddr();
+  const assetUnit   = `${token.policyId}${token.assetName}`;
+
+  let datum, value;
+  if (action === 'buy') {
+    const adaIn = BigInt(amount) * 1_000_000n; // CLI passes ADA, not lovelace
+    const expectedOut = quoteBuy(adaReserve, tokenReserve, adaIn);
+    const minOut = expectedOut - (expectedOut * SLIPPAGE_BPS) / 10_000n;
+    const creatorFee = (adaIn * BigInt(token.creatorFeeBps)) / 10_000n;
+    const lockedLovelace = adaIn + PLATFORM_FEE + creatorFee + MIN_UTXO_LOVELACE;
+    datum = { ownerPkh, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Buy', amount: adaIn, minOut, creatorPkh, treasuryPkh };
+    value = { lovelace: lockedLovelace };
+    console.log(`▶ ${w.name}  BUY  ${amount} tADA  →  ~${Number(expectedOut).toLocaleString()} $${token.ticker}  (locks ${(Number(lockedLovelace)/1e6).toFixed(2)} tADA)`);
+  } else if (action === 'sell') {
+    const tokensIn = BigInt(amount); // CLI passes raw token units
+    const grossAda = quoteSellGross(adaReserve, tokenReserve, tokensIn);
+    const creatorFee = (grossAda * BigInt(token.creatorFeeBps)) / 10_000n;
+    const adaNet = grossAda - PLATFORM_FEE - creatorFee;
+    const minOut = adaNet - (adaNet * SLIPPAGE_BPS) / 10_000n;
+    if (adaNet < MIN_UTXO_LOVELACE) throw new Error('Sell amount too small — net below 1 ADA min UTxO');
+    datum = { ownerPkh, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Sell', amount: tokensIn, minOut, creatorPkh, treasuryPkh };
+    value = { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensIn };
+    console.log(`▶ ${w.name}  SELL  ${Number(tokensIn).toLocaleString()} $${token.ticker}  →  ~${(Number(adaNet)/1e6).toFixed(2)} tADA net  (locks ${Number(tokensIn).toLocaleString()} tokens + min UTxO)`);
+  } else {
+    throw new Error(`Unknown action '${action}'. Use 'buy' or 'sell'.`);
+  }
+
+  const tx = await lucid.newTx()
+    .pay.ToAddressWithData(obAddr, { kind: 'inline', value: encodeOrderDatum(datum) }, value)
+    .complete();
+  const signed = await tx.sign.withWallet().complete();
+  const txHash = await signed.submit();
+  console.log(`    locked  ${txHash}`);
+
+  // Kick the batcher tick (idempotent — will short-circuit if a tick is in-flight).
+  try {
+    const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
+    if (r.ok) {
+      const j = await r.json();
+      console.log(`    batcher  processed=${j.ordersProcessed ?? 0}  skipped=${j.ordersSkipped ?? 0}  errors=${j.errors ?? 0}`);
+    } else {
+      console.log(`    batcher  /api/orders → ${r.status} (npm run dev not running?)`);
+    }
+  } catch { console.log(`    batcher  /api/orders unreachable`); }
+}
+
+async function cmdBurst(walletCount, adaEach, ticker) {
+  walletCount = Number(walletCount) || 2;
+  const adaArg = adaEach ?? 25;
+  const wallets = (await loadWallets()).slice(0, walletCount);
+  if (wallets.length < walletCount) throw new Error(`Only ${wallets.length} wallet(s) initialised; run \`init ${walletCount}\` first.`);
+
+  console.log(`▶ Burst: ${walletCount} concurrent BUY orders × ${adaArg} tADA each`);
+  const t0 = Date.now();
+  const results = await Promise.allSettled(wallets.map((_, i) => cmdTrade(i, 'buy', adaArg, ticker)));
+  console.log(`\n▶ Burst submitted in ${Date.now() - t0} ms`);
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'rejected') console.log(`  wallet ${i}: ✗ ${r.reason?.message ?? r.reason}`);
+  }
+}
+
+async function cmdCancel(walletIdx) {
+  const wallets = await loadWallets();
+  const w = wallets[Number(walletIdx)];
+  if (!w) throw new Error(`No wallet at index ${walletIdx}.`);
+
+  const lucid = await lucidWith(w.seed);
+  const obAddr = await orderBookAddr();
+  const all = await lucid.utxosAt(obAddr);
+  const ownerPkh = pkhFromBech32(w.address);
+
+  const mine = [];
+  for (const u of all) {
+    if (!u.datum) continue;
+    try {
+      const d = decodeOrderDatum(u.datum);
+      if (d.ownerPkh === ownerPkh) mine.push(u);
+    } catch { /* skip */ }
+  }
+
+  if (mine.length === 0) { console.log(`No pending orders for ${w.name}.`); return; }
+  console.log(`▶ Cancelling ${mine.length} order(s) for ${w.name}`);
+
+  const validator = await orderBookValidator();
+  // Cancel one tx per order (validator only requires owner sig + Cancel
+  // redeemer; could batch into one tx but leave that for later).
+  for (const u of mine) {
+    try {
+      const tx = await lucid.newTx()
+        .collectFrom([u], encodeOrderRedeemerCancel())
+        .attach.SpendingValidator(validator)
+        .addSigner(w.address)
+        .complete();
+      const signed = await tx.sign.withWallet().complete();
+      const txHash = await signed.submit();
+      console.log(`    cancel  ${u.txHash.slice(0, 12)}…#${u.outputIndex}  →  ${txHash.slice(0, 12)}…`);
+    } catch (e) {
+      console.log(`    cancel  ${u.txHash.slice(0, 12)}…#${u.outputIndex}  ✗  ${e.message ?? e}`);
+    }
+  }
+}
+
+// ── Argv dispatch ─────────────────────────────────────────────────────────
+
+const HELP = `Preprod batcher test harness.
+
+  init [count]                 Generate wallets (default 2). Stores seed phrases in .wallets.json
+  faucet                       Print the wallet addresses to fund
+  status                       Show every wallet's tADA, token holdings, pending orders
+  trade <i> buy  <ada>  [tkr]  Submit a BUY order  from wallet i for <ada> tADA
+  trade <i> sell <tokens> [tkr] Submit a SELL order from wallet i for <tokens> raw units
+  burst <count> [adaEach] [tkr] Submit <count> concurrent BUYs from wallets 0..count-1
+  cancel <i>                   Cancel every pending order owned by wallet i
+`;
+
+async function main() {
+  await loadEnv();
+  const [, , subcmd, ...args] = process.argv;
+  switch (subcmd) {
+    case 'init':   await cmdInit(args[0]); break;
+    case 'faucet': await cmdFaucet(); break;
+    case 'status': await cmdStatus(); break;
+    case 'trade':  await cmdTrade(args[0], args[1], args[2], args[3]); break;
+    case 'burst':  await cmdBurst(args[0], args[1], args[2]); break;
+    case 'cancel': await cmdCancel(args[0]); break;
+    case 'help':
+    case '--help':
+    case undefined:
+      console.log(HELP); break;
+    default:
+      console.log(`Unknown subcommand '${subcmd}'.\n\n${HELP}`); process.exit(1);
+  }
+}
+
+main().catch(err => {
+  console.error('✗ ' + (err?.message ?? err));
+  if (process.env.DEBUG) console.error(err);
+  process.exit(1);
+});

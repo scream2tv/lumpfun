@@ -1,0 +1,3 @@
+# Generated wallets — preprod only, but seeds are plaintext so keep
+# out of version control regardless.
+.wallets.json

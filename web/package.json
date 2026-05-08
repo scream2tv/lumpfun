@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "preprod": "node scripts/preprod-test/cli.mjs",
     "postinstall": "node scripts/patch-libsodium.mjs"
   },
   "dependencies": {
