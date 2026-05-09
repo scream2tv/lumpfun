@@ -71,12 +71,26 @@ function envConfig() {
                     ? 'https://cardano-mainnet.blockfrost.io/api/v0'
                     : 'https://cardano-preprod.blockfrost.io/api/v0');
   const treasuryAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
-  if (network === 'Mainnet') {
-    throw new Error('preprod-test refuses to run on Mainnet. Check NEXT_PUBLIC_CARDANO_NETWORK.');
+  if (network === 'Mainnet' && process.env.LUMPFUN_ALLOW_MAINNET !== '1') {
+    throw new Error(
+      'Refusing to run on Mainnet. Set LUMPFUN_ALLOW_MAINNET=1 in the environment\n' +
+      'to opt in. This safety exists because mainnet trades spend real ADA.\n' +
+      'Example: LUMPFUN_ALLOW_MAINNET=1 npm run preprod -- status',
+    );
   }
   if (!projectId)       throw new Error('BLOCKFROST_PROJECT_ID not set in web/.env.local');
   if (!treasuryAddress) throw new Error('NEXT_PUBLIC_TREASURY_ADDRESS not set in web/.env.local');
   return { network, projectId, baseUrl, treasuryAddress };
+}
+
+// Loud banner whenever any command runs on mainnet — a stray invocation
+// (status from a stale shell, etc.) shouldn't be silent.
+function warnIfMainnet() {
+  if (process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet') {
+    process.stderr.write(
+      '\n⚠ \x1b[33mMAINNET\x1b[0m — trades spend real ADA. Cancel before running if this is unintended.\n\n',
+    );
+  }
 }
 
 async function lucidWith(seed) {
@@ -382,6 +396,20 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
     catch { console.log('still pending — proceeding anyway, may fail'); }
   }
 
+  // Pre-flight balance check. A 1 ADA mainnet buy locks 1 + 1 platform
+  // + ~0.01 creator + 2 min-UTxO ≈ 4 ADA at the order_book, plus ~0.18
+  // tx fee for the lock tx. We conservatively need >5 ADA spendable
+  // before any buy. Catches "wallet has 0.5 ADA" before it hits an
+  // opaque Lucid coin-selection error.
+  const walletUtxos0 = await fetchAllWalletUtxos(lucid, w.address);
+  const walletLovelace = walletUtxos0.reduce((s, u) => s + (u.assets.lovelace ?? 0n), 0n);
+  if (walletLovelace < 5_000_000n) {
+    throw new Error(
+      `Insufficient balance: ${(Number(walletLovelace) / 1e6).toFixed(3)} ADA. ` +
+      `Need ≥5 ADA to safely cover a small buy + fees. Fund the address and retry.`,
+    );
+  }
+
   const { adaReserve, tokenReserve } = await fetchCurve(token, lucid);
 
   // Slippage tolerance grows with burst size: each FIFO-queued order
@@ -676,6 +704,7 @@ const HELP = `Preprod batcher test harness.
 
 async function main() {
   await loadEnv();
+  warnIfMainnet();
   const [, , subcmd, ...args] = process.argv;
   switch (subcmd) {
     case 'init':   await cmdInit(args[0]); break;
