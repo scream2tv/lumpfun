@@ -7,6 +7,7 @@ import { decodeOrderDatum, type OrderDatum } from '@/lib/order-codec';
 import { getOrderBookAddress } from '@/lib/order-book';
 import { cancelOrder } from '@/lib/order-tx';
 import { txExplorerUrl, safeBigInt } from '@/lib/utils';
+import { classifyError, TX_UX } from '@/lib/tx-errors';
 
 // Per-token list of the connected wallet's pending orders. Surfaces both
 // the queue UX (how many trades the batcher still has to drain) and the
@@ -92,6 +93,10 @@ export function PendingOrders({
   const { wallet, walletApi } = useWallet();
   const queryClient = useQueryClient();
   const [cancellingRef, setCancellingRef] = useState<string | null>(null);
+  // Per-row error message keyed by `${txHash}#${outputIndex}`. Lets us
+  // surface the actual CIP-30 reason in the row instead of swallowing it
+  // into console.error like the prior version did.
+  const [cancelErrors, setCancelErrors] = useState<Record<string, string>>({});
 
   const ownerPkh = wallet?.pkh;
 
@@ -123,12 +128,14 @@ export function PendingOrders({
         const ref = `${o.txHash}#${o.outputIndex}`;
         const isCancelling = cancellingRef === ref;
         const isBuy = o.datum.action === 'Buy';
+        const cancelErr = cancelErrors[ref];
         return (
           <div
             key={ref}
-            className="flex items-center justify-between gap-3 rounded-md p-2"
+            className="flex flex-col gap-1.5 rounded-md p-2"
             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
           >
+            <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col gap-0.5 min-w-0 flex-1">
               <p className="text-[11px] font-semibold" style={{ color: isBuy ? 'var(--teal)' : 'var(--lava)' }}>
                 {isBuy ? 'BUY' : 'SELL'}
@@ -152,17 +159,30 @@ export function PendingOrders({
               onClick={async () => {
                 if (!walletApi) return;
                 setCancellingRef(ref);
+                setCancelErrors(prev => { const { [ref]: _drop, ...rest } = prev; return rest; });
+                // Single auto-retry on transient wallet errors (Vespr's
+                // -2 InternalError and -3 lack-of-access are usually a
+                // stale-session blip that goes away on the second try).
+                // Hard failures and user-cancelled don't retry.
+                const tryOnce = () =>
+                  cancelOrder(walletApi, { txHash: o.txHash, outputIndex: o.outputIndex });
                 try {
-                  await cancelOrder(walletApi, { txHash: o.txHash, outputIndex: o.outputIndex });
+                  try {
+                    await tryOnce();
+                  } catch (firstErr) {
+                    const cls = classifyError(firstErr);
+                    if (cls.code === 'INTERNAL_ERROR' || cls.code === 'WALLET_DISCONNECTED') {
+                      console.warn('[pending-orders] cancel transient — retrying once:', cls.code);
+                      await tryOnce();
+                    } else {
+                      throw firstErr;
+                    }
+                  }
                 } catch (e) {
-                  // Some wallets (Vespr in particular) throw post-submit
-                  // even when the cancel tx actually landed. Surface the
-                  // error but still refetch — if the cancel really did
-                  // submit, the next /api/order-book-utxos poll will see
-                  // the order gone and the row will disappear naturally.
-                  // If it truly failed, the row stays and the user can
-                  // retry without a stale-UI restart.
-                  console.error('[pending-orders] cancel failed:', e);
+                  const cls = classifyError(e);
+                  const ux  = TX_UX[cls.code];
+                  console.error('[pending-orders] cancel failed:', cls.code, cls.raw);
+                  setCancelErrors(prev => ({ ...prev, [ref]: `${ux.headline}: ${ux.body}` }));
                 } finally {
                   queryClient.invalidateQueries({ queryKey: ['pending-orders'] });
                   setCancellingRef(null);
@@ -182,6 +202,12 @@ export function PendingOrders({
             >
               {isCancelling ? 'Cancelling…' : 'Cancel'}
             </button>
+            </div>
+            {cancelErr && (
+              <p className="text-[11px]" style={{ color: 'var(--lava-bright)', lineHeight: 1.4 }}>
+                {cancelErr}
+              </p>
+            )}
           </div>
         );
       })}
