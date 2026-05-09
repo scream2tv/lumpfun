@@ -30,15 +30,23 @@ const BUY_CHIPS  = [
 ] as const;
 const SELL_PCTS  = [10, 25, 50, 100] as const;
 
-// Default slippage tolerance (bps) for both sides of the curve. We keep this
-// tight because LumpFun's bonding curve is exact constant-product on-chain —
-// the only price-changing thing between the local quote and submission is a
-// competing trade landing in the same block. Other launchpads run higher
-// auto-slippage (5%+) because they route through DEXes with shallow off-chain
-// liquidity that can shift mid-flight; ours doesn't. Surface this as an
-// "advanced" UI control later if creators ask for it; for now keep it fixed
-// so users don't foot-gun themselves into a 5% MEV loss on a quiet curve.
-const DEFAULT_SLIPPAGE_BPS = 50; // 0.5%
+// Default slippage tolerance (bps), split by mode.
+//
+// Direct mode (DEFAULT_SLIPPAGE_BPS_DIRECT): trades land in the same block
+// they were quoted against, so the only price-changing thing between
+// quote and execution is a *competing* trade in that same block. 0.5%
+// covers it without foot-gunning users into MEV.
+//
+// Queue mode (DEFAULT_SLIPPAGE_BPS_QUEUE): orders execute serially against
+// a moving curve, so each order behind yours moves the price before yours
+// runs. Empirically, two 250 tADA orders submitted near-simultaneously
+// see ~14% cumulative price impact on a fresh curve — well outside the
+// 0.5% direct default. 5% gives headroom for ~2-3 sequential orders;
+// users issuing larger bursts will need explicit user-controlled
+// slippage UI (not yet built — surface as "advanced" later).
+const DEFAULT_SLIPPAGE_BPS_DIRECT = 50;   // 0.5%
+const DEFAULT_SLIPPAGE_BPS_QUEUE  = 500;  // 5%
+const DEFAULT_SLIPPAGE_BPS = QUEUE_ON ? DEFAULT_SLIPPAGE_BPS_QUEUE : DEFAULT_SLIPPAGE_BPS_DIRECT;
 
 interface CurveState {
   adaReserve: bigint;

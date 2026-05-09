@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useWallet } from '@/lib/wallet';
 import { txExplorerUrl } from '@/lib/utils';
+import { rawErrorString } from '@/lib/tx-errors';
 
 // Creator-only panel on the token detail page.
 //
@@ -399,20 +400,12 @@ function ReVestForm({
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// Defers to the central rawErrorString so Lucid's Effect-wrapped
+// failures (TxSignerError, TxSubmitError) unwrap to the underlying
+// CIP-30 {code, info} payload instead of bottoming out at "[object
+// Object]". Truncates for display.
 function extractErrorMessage(e: unknown): string {
-  if (e instanceof Error) return e.message.split('\n')[0].slice(0, 240);
-  if (typeof e === 'string') return e.split('\n')[0].slice(0, 240);
-  if (e && typeof e === 'object') {
-    const o = e as Record<string, unknown>;
-    if (typeof o.message === 'string') return o.message.split('\n')[0].slice(0, 240);
-    if (typeof o.cause === 'string')   return o.cause.split('\n')[0].slice(0, 240);
-    if (o.cause && typeof o.cause === 'object') {
-      const c = o.cause as Record<string, unknown>;
-      if (typeof c.message === 'string') return c.message.split('\n')[0].slice(0, 240);
-    }
-    try { return JSON.stringify(e).slice(0, 240); } catch { /* fallthrough */ }
-  }
-  return String(e);
+  return rawErrorString(e).split('\n')[0].slice(0, 240);
 }
 
 function fmtRemaining(ms: number): string {

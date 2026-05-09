@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useWallet } from '@/lib/wallet';
 import { txExplorerUrl, safeBigInt } from '@/lib/utils';
+import { rawErrorString } from '@/lib/tx-errors';
 
 // Per-token "Creator fees" panel. Public-readable balances (anyone can see
 // what's accrued and what's been swept); claim button is creator-only.
@@ -29,21 +30,12 @@ function fmtAda(lovelace: bigint, decimals = 3): string {
   return `${ada.toFixed(4)} ₳`;
 }
 
+// Defers to the central rawErrorString in @/lib/tx-errors so Lucid's
+// Effect-wrapped failures (TxSignerError, TxSubmitError) unwrap to the
+// underlying CIP-30 {code, info} payload instead of bottoming out at
+// "[object Object]". Truncates the result for display.
 function extractErrorMessage(e: unknown): string {
-  if (e instanceof Error)   return e.message.split('\n')[0].slice(0, 240);
-  if (typeof e === 'string') return e.split('\n')[0].slice(0, 240);
-  if (e && typeof e === 'object') {
-    const o = e as Record<string, unknown>;
-    if (typeof o.info === 'string')    return o.info.split('\n')[0].slice(0, 240);
-    if (typeof o.message === 'string') return o.message.split('\n')[0].slice(0, 240);
-    if (typeof o.cause === 'string')   return o.cause.split('\n')[0].slice(0, 240);
-    if (o.cause && typeof o.cause === 'object') {
-      const c = o.cause as Record<string, unknown>;
-      if (typeof c.message === 'string') return c.message.split('\n')[0].slice(0, 240);
-    }
-    try { return JSON.stringify(e).slice(0, 240); } catch { /* fallthrough */ }
-  }
-  return String(e);
+  return rawErrorString(e).split('\n')[0].slice(0, 240);
 }
 
 export function CreatorFeesPanel(props: Props) {
