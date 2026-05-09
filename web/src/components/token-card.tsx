@@ -10,10 +10,6 @@ function mcap(ada: number): string {
   return ada.toFixed(0);
 }
 
-function trunc(addr: string) {
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
 export function TokenCard({ token }: { token: TokenInfo }) {
   return (
     <Link
@@ -77,12 +73,6 @@ export function TokenCard({ token }: { token: TokenInfo }) {
               {token.description}
             </p>
           )}
-          <p className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>
-            by{' '}
-            <span style={{ color: 'var(--text)', fontFamily: 'var(--font-jetbrains), monospace' }}>
-              {trunc(token.creatorAddress)}
-            </span>
-          </p>
         </div>
       </div>
 

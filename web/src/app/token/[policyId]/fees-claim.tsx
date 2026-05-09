@@ -6,10 +6,20 @@ import { useWallet } from '@/lib/wallet';
 import { txExplorerUrl, safeBigInt } from '@/lib/utils';
 import { rawErrorString } from '@/lib/tx-errors';
 
-// Per-token "Creator fees" panel. Public-readable balances (anyone can see
-// what's accrued and what's been swept); claim button is creator-only.
-// Polls /api/fee-accumulator every 15s so trade activity reflects within
-// seconds and "claimed" updates the moment a sweep tx confirms.
+// Per-token "Creator fees" panel.
+//
+// Two distinct numbers, both shown:
+//
+//   1. THIS TOKEN'S lifetime fees — derived by /api/token-fees from this
+//      token's trade history. The number a creator actually wants to see
+//      on a token page; it's not contaminated by sibling tokens.
+//
+//   2. The accumulator POOL — creator-wide, since the on-chain script is
+//      parameterised by creator_pkh alone. Powers the sweep button (sweep
+//      drains the whole pool; it can't be partial / per-token).
+//
+// Polls every 15s so trade activity reflects within seconds and "claimed"
+// updates the moment a sweep tx confirms.
 
 interface Props {
   policyId:                    string;
@@ -21,7 +31,16 @@ interface Props {
   initialClaimedTxHash?:       string;
 }
 
-interface Stats { unclaimed: bigint; claimed: bigint }
+interface Stats {
+  /** Lifetime fees attributable to THIS token (derived from trade history). */
+  tokenLifetime: bigint;
+  /** True if /api/token-fees hit its 100-tx ceiling. */
+  truncated:     boolean;
+  /** Pool unclaimed (creator-wide; the sweep button acts on this). */
+  unclaimed:     bigint;
+  /** Pool claimed (creator-wide). */
+  claimed:       bigint;
+}
 
 function fmtAda(lovelace: bigint, decimals = 3): string {
   const ada = Number(lovelace) / 1_000_000;
@@ -42,28 +61,43 @@ export function CreatorFeesPanel(props: Props) {
   const { wallet, walletApi } = useWallet();
   const isCreator = wallet?.address === props.creatorAddress;
 
+  // Initial pool numbers come from server-side props; tokenLifetime starts at
+  // 0 and gets filled by the first /api/token-fees poll (it's a heavier query
+  // so we don't block initial render on it).
   const initial: Stats = {
-    unclaimed: safeBigInt(props.initialUnclaimed),
-    claimed:   safeBigInt(props.initialClaimed),
+    tokenLifetime: 0n,
+    truncated:     false,
+    unclaimed:     safeBigInt(props.initialUnclaimed),
+    claimed:       safeBigInt(props.initialClaimed),
   };
 
   const { data: stats = initial } = useQuery<Stats>({
-    queryKey: ['fee-accumulator', props.feeAccumulatorAddress],
+    queryKey: ['token-fees', props.policyId],
     queryFn: async () => {
       const res = await fetch(
-        `/api/fee-accumulator?address=${encodeURIComponent(props.feeAccumulatorAddress)}`,
+        `/api/token-fees?policyId=${encodeURIComponent(props.policyId)}`,
         { cache: 'no-store' },
       );
       if (!res.ok) return initial;
-      const json = await res.json() as { unclaimed: string; claimed: string };
-      return { unclaimed: safeBigInt(json.unclaimed), claimed: safeBigInt(json.claimed) };
+      const json = await res.json() as {
+        lifetime:  string;
+        truncated: boolean;
+        pool: { lifetime: string; claimed: string; unclaimed: string } | null;
+      };
+      return {
+        tokenLifetime: safeBigInt(json.lifetime),
+        truncated:     !!json.truncated,
+        unclaimed:     json.pool ? safeBigInt(json.pool.unclaimed) : 0n,
+        claimed:       json.pool ? safeBigInt(json.pool.claimed)   : 0n,
+      };
     },
     refetchInterval: 15_000,
     refetchOnWindowFocus: true,
     initialData: initial,
   });
 
-  const lifetime = stats.unclaimed + stats.claimed;
+  // "lifetime" headline = this token's fees, NOT the pool's.
+  const lifetime = stats.tokenLifetime;
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]           = useState<string | null>(null);
   const [txHash, setTxHash]         = useState<string | null>(props.initialClaimedTxHash ?? null);
@@ -85,20 +119,23 @@ export function CreatorFeesPanel(props: Props) {
         </p>
         {hasActivity && (
           <span className="text-[11px]" style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-jetbrains), monospace' }}>
-            lifetime {fmtAda(lifetime, 2)}
+            this token {fmtAda(lifetime, 2)}{stats.truncated ? '+' : ''}
           </span>
         )}
       </div>
 
-      {/* Two-up split: unclaimed (highlighted) | claimed */}
+      {/* Two-up split: pool unclaimed (highlighted) | pool claimed.
+          Labelled "pool" so users understand the sweep button drains the
+          shared accumulator across all tokens by this creator, not just
+          this one. */}
       <div className="grid grid-cols-2 gap-2">
         <Stat
-          label="Unclaimed"
+          label="Pool unclaimed"
           value={fmtAda(stats.unclaimed)}
           tone={hasUnclaimed ? 'teal' : 'mute'}
         />
         <Stat
-          label="Claimed"
+          label="Pool claimed"
           value={fmtAda(stats.claimed)}
           tone="mute"
         />
@@ -118,7 +155,9 @@ export function CreatorFeesPanel(props: Props) {
         </p>
       ) : (
         <p className="text-[11px]" style={{ color: 'var(--text-dim)', lineHeight: 1.5 }}>
-          Trades pay creator fees into a per-launch script. The creator can sweep at any time.
+          Trades pay creator fees into a shared script for this creator.
+          The headline above isolates this token; the sweep below drains
+          the whole pool.
         </p>
       )}
 

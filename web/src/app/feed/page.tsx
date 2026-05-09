@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Suspense } from 'react';
 import { TokenCard } from '@/components/token-card';
 import { BestOfBunker } from './best-of-bunker';
+import { TopEarners } from './top-earners';
 import { fetchTokenList, fetchTokenInfo } from '@/lib/blockfrost';
 import type { SortMode, TokenInfo } from '@/lib/types';
 
@@ -153,9 +154,19 @@ export default async function HomePage({
         </Link>
       </div>
 
-      <Suspense fallback={<Skeleton />}>
-        <FeedBody sort={sortMode} />
-      </Suspense>
+      {/* Two-column layout: feed on the left, leaderboard rail on the
+          right. Stacks below the feed on screens narrower than lg so we
+          don't crowd cards on mobile. */}
+      <div className="flex flex-col lg:flex-row gap-4 lg:gap-6 lg:items-start">
+        <div className="flex-1 min-w-0">
+          <Suspense fallback={<Skeleton />}>
+            <FeedBody sort={sortMode} />
+          </Suspense>
+        </div>
+        <div className="lg:w-72 lg:shrink-0 lg:sticky lg:top-4">
+          <TopEarners />
+        </div>
+      </div>
     </div>
   );
 }
