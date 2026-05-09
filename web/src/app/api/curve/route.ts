@@ -28,9 +28,33 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'address and asset required' }, { status: 400 });
   }
 
-  const state = await fetchCurveState(address, asset);
+  // Wrap the Blockfrost call so a missing/wrong server-side
+  // BLOCKFROST_PROJECT_ID, a 401 from BF, or a network glitch returns a
+  // structured diagnostic the trade panel can surface, instead of bubbling
+  // out as an opaque 500. The trade panel's runTrade can match on the
+  // 'kind' field and route through the same classifier as wallet errors.
+  let state: Awaited<ReturnType<typeof fetchCurveState>>;
+  try {
+    state = await fetchCurveState(address, asset);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[api/curve] blockfrost fetch failed:', msg);
+    // Detect the most common operator error so the dev/operator sees it
+    // at-a-glance instead of grep'ing logs. Never echo the project_id.
+    const projectIdSet = !!process.env.BLOCKFROST_PROJECT_ID;
+    const network      = process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? '(unset)';
+    return NextResponse.json({
+      error: 'curve fetch failed',
+      reason: msg.slice(0, 240),
+      hint:   !projectIdSet
+        ? 'BLOCKFROST_PROJECT_ID is not set on the server. The web app needs it for /api/curve etc., not just NEXT_PUBLIC_BLOCKFROST_PROJECT_ID.'
+        : `Server is configured for ${network}. Verify BLOCKFROST_BASE_URL matches and the address belongs to that network.`,
+      kind: 'blockfrost_unreachable',
+    }, { status: 502 });
+  }
+
   if (!state) {
-    return NextResponse.json({ error: 'curve UTxO not found' }, { status: 404 });
+    return NextResponse.json({ error: 'curve UTxO not found', kind: 'utxo_gone' }, { status: 404 });
   }
 
   // Always offer to graduate — runGraduation is idempotent and the validator

@@ -74,7 +74,20 @@ async function fetchCurveState(curveAddress: string, assetUnit: string): Promise
     `/api/curve?address=${encodeURIComponent(curveAddress)}&asset=${encodeURIComponent(assetUnit)}`,
     { cache: 'no-store' },
   );
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // 404 = curve UTxO genuinely gone (graduated mid-poll). Treat as
+    // null — the page will surface "Graduated" via the registry. For
+    // 5xx (server-side Blockfrost failure, missing env, etc.) throw
+    // with the diagnostic so runTrade's classifier can surface it
+    // instead of silently aborting the trade.
+    if (res.status === 404) return null;
+    let detail = `${res.status}`;
+    try {
+      const j = await res.json() as { reason?: string; hint?: string; error?: string };
+      detail = `${j.error ?? 'curve fetch failed'}${j.reason ? `: ${j.reason}` : ''}${j.hint ? ` — ${j.hint}` : ''}`;
+    } catch { /* keep status as-is */ }
+    throw new Error(`/api/curve ${detail}`);
+  }
   const data = await res.json();
   return { adaReserve: safeBigInt(data.adaReserve), tokenReserve: safeBigInt(data.tokenReserve) };
 }
@@ -462,7 +475,7 @@ export function TradePanel({
   // the network request, so the metric row + trade panel stay in sync off
   // a single 5-second poll. We pull `refetch` so the auto-retry path can
   // pull a fresh curve UTxO before re-attempting on a race-style failure.
-  const { data: curve, isLoading: curveLoading, refetch: refetchCurve } = useQuery({
+  const { data: curve, isLoading: curveLoading, refetch: refetchCurve, error: curveError } = useQuery({
     queryKey: ['curve', curveAddress, assetUnit],
     queryFn:  () => fetchCurveState(curveAddress, assetUnit),
     refetchInterval: 5_000,
@@ -857,6 +870,44 @@ export function TradePanel({
       className="rounded-xl p-4 flex flex-col gap-3"
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-mid)' }}
     >
+      {/* Curve fetch failure — server-side /api/curve is failing. The
+          React Query error here covers the most common operator misconfig
+          (BLOCKFROST_PROJECT_ID missing, network mismatch). Without a
+          visible banner the trade panel just renders "Loading…" forever
+          and users can't tell if it's their network or our backend. */}
+      {curveError && !curve && (
+        <div
+          role="alert"
+          className="rounded-lg p-3 flex items-start justify-between gap-3"
+          style={{ background: 'rgba(232, 90, 42, 0.08)', border: '1px solid rgba(232, 90, 42, 0.25)' }}
+        >
+          <div className="flex flex-col gap-1 min-w-0 flex-1">
+            <p className="text-xs font-semibold" style={{ color: 'var(--lava-bright)', fontFamily: 'var(--font-outfit)' }}>
+              Curve unavailable
+            </p>
+            <p className="text-[11px]" style={{ color: 'var(--text-dim)', lineHeight: 1.45 }}>
+              {curveError instanceof Error ? curveError.message : 'Could not reach the indexer.'}
+              {' '}Trades disabled until the live curve loads.
+            </p>
+            <button
+              type="button"
+              onClick={() => refetchCurve()}
+              className="self-start mt-1 text-xs font-semibold rounded-md"
+              style={{
+                padding: '5px 10px',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-mid)',
+                color: 'var(--text)',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-outfit)',
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Outcome banner — exactly one of:
             success (direct mode)     → TxBanner (polls /api/tx-status until confirmed/outraced)
             success (queue mode)      → QueuedBanner (no poller; PendingOrders panel is source of truth)
