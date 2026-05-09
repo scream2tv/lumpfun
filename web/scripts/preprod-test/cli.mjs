@@ -460,7 +460,7 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
   // back-to-back doesn't serialise on each tick's lucid.awaitTx loop. The
   // user can run `tick` or `wait <i>` afterward to see the actual batcher
   // outcome.
-  fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+  void kickBatcherAsync();
   console.log(`    batcher  kicked (fire-and-forget — run \`wait ${walletIdx}\` to follow)`);
 }
 
@@ -484,6 +484,11 @@ async function cmdTick() {
   // Vercel cron only runs on deployed Vercel projects, not on `next dev`.
   // Use this to manually drain whatever's pending. Idempotent — the
   // server-side tickInFlight guard collapses concurrent triggers.
+  //
+  // For `tick` itself we DO wait for the response (this is the only place
+  // we actually want the structured result). For wait-all + cmdTrade's
+  // kicks we use a short-timeout abort because the fetch otherwise blocks
+  // the calling loop for the whole batcher run (~150s on a 5-order tick).
   try {
     const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
     if (!r.ok) { console.log(`/api/orders → ${r.status}. Is npm run dev running?`); return; }
@@ -495,10 +500,32 @@ async function cmdTick() {
   } catch (e) { console.log(`/api/orders unreachable: ${e.message ?? e}`); }
 }
 
-async function cmdWait(walletIdx, timeoutSec = 90) {
+// Fire-and-forget batcher kick. Sends the POST and abandons the response
+// after a short window — the tick continues running on the server even
+// after we abort (we only consume the connection), which is exactly what
+// wait/wait-all want: kick, don't block, poll the chain ourselves.
+async function kickBatcherAsync(timeoutMs = 3000) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    await fetch('http://localhost:3000/api/orders', {
+      method: 'POST', body: '{}', signal: ctrl.signal,
+    }).catch(() => { /* expected on abort */ });
+    clearTimeout(t);
+  } catch { /* swallow */ }
+}
+
+async function cmdWait(walletIdx, timeoutSec = 180) {
   // Poll until the wallet's pending orders are all gone (or timeout).
-  // Useful after a trade or burst — tells you when the batcher actually
-  // settled the orders without you having to spam `status`.
+  // Two correctness traps if you naively poll-and-exit-on-zero:
+  //   (a) called immediately after a submit — Blockfrost hasn't indexed
+  //       the lock yet, first poll is 0, you'd declare "settled" falsely.
+  //   (b) the batcher kick blocks for the whole tick (~150s on 5 orders)
+  //       so an awaited fetch drifts the elapsed clock past the timeout.
+  // Fixes: require seeing at least one non-zero poll before treating zero
+  // as a real terminal state (with a 45s grace exit if we never see one,
+  // covering the "nothing was actually pending" case); kick the batcher
+  // fire-and-forget with a short abort so the loop never blocks on it.
   const wallets = await loadWallets();
   const w = wallets[Number(walletIdx)];
   if (!w) throw new Error(`No wallet at index ${walletIdx}.`);
@@ -506,6 +533,7 @@ async function cmdWait(walletIdx, timeoutSec = 90) {
   const obAddr = await orderBookAddr();
   const ownerPkh = pkhFromBech32(w.address);
   const start = Date.now();
+  let sawOrders = false;
   console.log(`▶ Waiting up to ${timeoutSec}s for ${w.name} pending orders to drain…`);
   while (Date.now() - start < timeoutSec * 1000) {
     const all = await lucid.utxosAt(obAddr).catch(() => []);
@@ -514,43 +542,39 @@ async function cmdWait(walletIdx, timeoutSec = 90) {
       try { return decodeOrderDatum(u.datum).ownerPkh === ownerPkh; }
       catch { return false; }
     });
-    if (mine.length === 0) {
-      console.log(`✓ all settled (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    if (mine.length > 0) sawOrders = true;
+    const elapsed = ((Date.now() - start) / 1000);
+    if (mine.length === 0 && sawOrders) {
+      console.log(`✓ all settled (${elapsed.toFixed(1)}s)`);
       return;
     }
-
-    // Kick + capture the batcher's response so we can see WHY orders
-    // aren't draining (slippage skip, validator error, etc.). Without
-    // this the wait loop is opaque.
-    let tickSummary = 'tick unreachable';
-    try {
-      const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
-      if (r.ok) {
-        const j = await r.json();
-        tickSummary = `tried=${j.tokensTried ?? 0} processed=${j.ordersProcessed ?? 0} skipped=${j.ordersSkipped ?? 0} errors=${j.errors ?? 0}`;
-        if (j.sink === 'queue-off') tickSummary = '⚠ NEXT_PUBLIC_USE_QUEUE!=1 — batcher is gated off';
-      } else {
-        tickSummary = `/api/orders → ${r.status}`;
-      }
-    } catch (e) {
-      tickSummary = `/api/orders unreachable: ${e.message ?? e}`;
+    if (mine.length === 0 && !sawOrders && elapsed > 45) {
+      // 45s grace — if no orders ever surfaced, assume nothing was pending
+      // and exit clean. Distinct from a real "settled" since we never saw
+      // them, but the user clearly has nothing to wait for.
+      console.log(`✓ no pending orders observed in ${elapsed.toFixed(0)}s — nothing to do`);
+      return;
     }
-    console.log(`  ${mine.length} still pending… (${((Date.now() - start) / 1000).toFixed(0)}s)  [${tickSummary}]`);
-    await new Promise(r => setTimeout(r, 10_000));
+    // Fire-and-forget kick — never blocks the loop.
+    void kickBatcherAsync();
+    console.log(`  ${mine.length} still pending… (${elapsed.toFixed(0)}s)`);
+    await new Promise(r => setTimeout(r, 7_000));
   }
   console.log(`✗ timeout after ${timeoutSec}s — pending orders still present. Run \`status\` for detail.`);
 }
 
-async function cmdWaitAll(timeoutSec = 180) {
-  // Block until every wallet's pending orders drain. Useful after a
-  // burst — kicks the batcher each loop and reports global progress
-  // so you don't have to chain N backgrounded `wait` invocations.
+async function cmdWaitAll(timeoutSec = 240) {
+  // See cmdWait for the rationale on (a) the seen-orders gate and
+  // (b) the fire-and-forget kick. Same shape, just polls every wallet
+  // rather than one. Default timeout 240s gives headroom for ~6-order
+  // bursts to drain serially across blocks.
   const wallets = await loadWallets();
   if (wallets.length === 0) { console.log('No wallets.'); return; }
   const lucid = await lucidWith();
   const obAddr = await orderBookAddr();
   const ownerPkhs = new Set(wallets.map(w => pkhFromBech32(w.address)));
   const start = Date.now();
+  let sawOrders = false;
   console.log(`▶ Waiting up to ${timeoutSec}s for ${wallets.length} wallets' orders to drain…`);
   while (Date.now() - start < timeoutSec * 1000) {
     const all = await lucid.utxosAt(obAddr).catch(() => []);
@@ -559,20 +583,19 @@ async function cmdWaitAll(timeoutSec = 180) {
       try { return ownerPkhs.has(decodeOrderDatum(u.datum).ownerPkh); }
       catch { return false; }
     });
-    if (mine.length === 0) {
-      console.log(`✓ all settled across ${wallets.length} wallets (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    if (mine.length > 0) sawOrders = true;
+    const elapsed = ((Date.now() - start) / 1000);
+    if (mine.length === 0 && sawOrders) {
+      console.log(`✓ all settled across ${wallets.length} wallets (${elapsed.toFixed(1)}s)`);
       return;
     }
-    let tickSummary = 'tick unreachable';
-    try {
-      const r = await fetch('http://localhost:3000/api/orders', { method: 'POST', body: '{}' });
-      if (r.ok) {
-        const j = await r.json();
-        tickSummary = `tried=${j.tokensTried ?? 0} processed=${j.ordersProcessed ?? 0} skipped=${j.ordersSkipped ?? 0} errors=${j.errors ?? 0}`;
-      }
-    } catch { /* swallow */ }
-    console.log(`  ${mine.length} still pending across all wallets… (${((Date.now() - start) / 1000).toFixed(0)}s)  [${tickSummary}]`);
-    await new Promise(r => setTimeout(r, 10_000));
+    if (mine.length === 0 && !sawOrders && elapsed > 45) {
+      console.log(`✓ no pending orders observed in ${elapsed.toFixed(0)}s — nothing to do`);
+      return;
+    }
+    void kickBatcherAsync();
+    console.log(`  ${mine.length} still pending across all wallets… (${elapsed.toFixed(0)}s)`);
+    await new Promise(r => setTimeout(r, 7_000));
   }
   console.log(`✗ timeout after ${timeoutSec}s. Run \`status\` for detail.`);
 }
@@ -646,8 +669,8 @@ const HELP = `Preprod batcher test harness.
   trade <i> sell <tokens> [tkr] [slippageBps] SELL from wallet i (raw token units)
   burst <count> [adaEach] [tkr] [slippageBps] <count> concurrent BUYs (bump bps for >5 orders)
   tick                         Kick the batcher (cron doesn't fire under \`next dev\`)
-  wait <i> [seconds]           Block until wallet i's pending orders all drain (default 90s)
-  wait-all [seconds]           Block until every wallet's orders drain (default 180s)
+  wait <i> [seconds]           Block until wallet i's pending orders all drain (default 180s)
+  wait-all [seconds]           Block until every wallet's orders drain (default 240s)
   cancel <i>                   Cancel every pending order owned by wallet i
 `;
 
@@ -661,8 +684,8 @@ async function main() {
     case 'trade':  await cmdTrade(args[0], args[1], args[2], args[3], args[4]); break;
     case 'burst':  await cmdBurst(args[0], args[1], args[2], args[3]); break;
     case 'tick':   await cmdTick(); break;
-    case 'wait':   await cmdWait(args[0], Number(args[1]) || 90); break;
-    case 'wait-all': await cmdWaitAll(Number(args[0]) || 180); break;
+    case 'wait':   await cmdWait(args[0], Number(args[1]) || 180); break;
+    case 'wait-all': await cmdWaitAll(Number(args[0]) || 240); break;
     case 'cancel': await cmdCancel(args[0]); break;
     case 'help':
     case '--help':
