@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useWallet, type Cip30Api } from '@/lib/wallet';
 import { quoteBuy, quoteSellGross } from '@/lib/curve-math';
 import { txExplorerUrl, safeBigInt } from '@/lib/utils';
+import { getOrderBookAddress } from '@/lib/order-book';
 import {
   classifyError, emitTxLog, outracedOutcome,
   shouldAutoRetry, TX_UX,
@@ -16,6 +17,7 @@ const TREASURY = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
 // Queue mode is a per-deployment switch; module-scope so render and
 // runTrade read the same value without a closure dance.
 const QUEUE_ON = process.env.NEXT_PUBLIC_USE_QUEUE === '1';
+const NETWORK  = (process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod') as 'Mainnet' | 'Preprod';
 const BF_URL   = process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet'
   ? 'https://cardano-mainnet.blockfrost.io/api/v0'
   : 'https://cardano-preprod.blockfrost.io/api/v0';
@@ -262,23 +264,50 @@ function QueuedBanner({
   const [cancelling, setCancelling] = useState(false);
   const [cancelErr,  setCancelErr]  = useState<string | null>(null);
 
-  // Self-healing batcher kick. The submit-time kick fires before
-  // Blockfrost has indexed the lock tx, so that first tick is a no-op.
-  // While this banner is mounted (i.e. the user has just submitted an
-  // order and hasn't dismissed it), kick /api/orders every 15s — by
-  // the second tick the order is visible and the batcher drains it.
-  // Independent of which wallet's PendingOrders panel is showing, so
-  // it works even if the user has switched accounts in their wallet
-  // between submit and confirmation. Server's tickInFlight semaphore
-  // collapses concurrent kicks; cost is negligible.
+  // Self-healing batcher kick + auto-dismiss when the order drains.
+  //
+  // The submit-time kick fires before Blockfrost indexes the lock tx,
+  // so that first tick is a no-op. While mounted we kick /api/orders
+  // every 15s — second tick onward catches the order and drains it.
+  //
+  // We also poll /api/order-book-utxos for our hash. State machine:
+  //   never seen   → kick + wait (lock tx still indexing)
+  //   seen queued  → kick + wait (batcher draining)
+  //   was queued, now gone → drained → auto-dismiss the banner.
+  //
+  // Without auto-dismiss the banner sticks around stale; users wonder
+  // if the order failed when really tokens have already landed.
+  const seenInQueueRef = useRef(false);
   useEffect(() => {
-    const kick = () => {
+    let cancelled = false;
+    const orderBookAddr = (() => {
+      try { return getOrderBookAddress(NETWORK); } catch { return null; }
+    })();
+
+    const tick = async () => {
+      if (cancelled) return;
+      // Kick the batcher.
       void fetch('/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+      // Probe order_book for our hash.
+      if (!orderBookAddr) return;
+      try {
+        const r = await fetch(`/api/order-book-utxos?address=${encodeURIComponent(orderBookAddr)}`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const utxos = (await r.json()) as Array<{ tx_hash: string }>;
+        const found = utxos.some(u => u.tx_hash === hash);
+        if (found) {
+          seenInQueueRef.current = true;
+        } else if (seenInQueueRef.current && !cancelled) {
+          // Seen it queued, now it's gone → drained.
+          onDismiss();
+        }
+      } catch { /* swallow */ }
     };
-    kick();
-    const id = setInterval(kick, 15_000);
-    return () => clearInterval(id);
-  }, [hash]);
+
+    tick();
+    const id = setInterval(tick, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [hash, onDismiss]);
 
   return (
     <div
