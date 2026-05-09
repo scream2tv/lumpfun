@@ -301,9 +301,12 @@ async function cmdInit(count) {
   } else {
     console.log(`Added ${fresh.length} ${network} wallet(s). Existing ${existing.length} preserved.`);
   }
-  console.log('\nFund the new addresses from https://docs.cardano.org/cardano-testnet/tools/faucet:');
+  const fundingHint = network === 'Mainnet'
+    ? 'Send mainnet ADA to each address from a funded wallet:'
+    : 'Fund the new addresses from https://docs.cardano.org/cardano-testnet/tools/faucet:';
+  console.log(`\n${fundingHint}`);
   for (const w of fresh) console.log(`  ${w.name}  ${w.address}`);
-  console.log(`\nThen run:  npm run preprod -- status`);
+  console.log(`\nThen run:  ${network === 'Mainnet' ? 'LUMPFUN_ALLOW_MAINNET=1 ' : ''}npm run preprod -- status`);
 }
 
 async function cmdFaucet() {
@@ -628,6 +631,61 @@ async function cmdWaitAll(timeoutSec = 240) {
   console.log(`✗ timeout after ${timeoutSec}s. Run \`status\` for detail.`);
 }
 
+async function cmdSweep(walletIdx, destAddr) {
+  if (!destAddr || !destAddr.startsWith('addr')) {
+    throw new Error('Usage: sweep <walletIdx|all> <destAddr>');
+  }
+  const wallets = await loadWallets();
+  const targets = walletIdx === 'all'
+    ? wallets.map((_, i) => i)
+    : [Number(walletIdx)];
+
+  for (const i of targets) {
+    const w = wallets[i];
+    if (!w) { console.log(`No wallet at index ${i}; skipping.`); continue; }
+
+    const lucid = await lucidWith(w.seed);
+    if (w.lastTxHash) {
+      try { await lucid.awaitTx(w.lastTxHash, 60_000); } catch { /* proceed */ }
+    }
+    const utxos = await fetchAllWalletUtxos(lucid, w.address);
+    if (utxos.length === 0) { console.log(`▶ ${w.name}: nothing to sweep`); continue; }
+
+    // Aggregate just for display — Lucid's complete() does the real
+    // accounting from the explicit collectFrom + change-address override.
+    let totalLovelace = 0n;
+    const tokenTotals = new Map();
+    for (const u of utxos) {
+      for (const [unit, qty] of Object.entries(u.assets)) {
+        if (unit === 'lovelace') totalLovelace += qty;
+        else tokenTotals.set(unit, (tokenTotals.get(unit) ?? 0n) + qty);
+      }
+    }
+    const tokenSummary = tokenTotals.size === 0
+      ? '(no tokens)'
+      : `${tokenTotals.size} token unit(s)`;
+
+    console.log(`▶ ${w.name}  sweeping ${utxos.length} UTxO${utxos.length === 1 ? '' : 's'}  ${(Number(totalLovelace) / 1e6).toFixed(2)} ADA + ${tokenSummary}  →  ${destAddr.slice(0, 18)}…`);
+
+    try {
+      // collectFrom all wallet UTxOs explicitly + override change address
+      // so Lucid's auto-balance routes the change (= entire wallet value
+      // minus fee) to the destination instead of back to the wallet.
+      const tx = await lucid.newTx()
+        .collectFrom(utxos)
+        .complete({ changeAddress: destAddr });
+      const signed = await tx.sign.withWallet().complete();
+      const txHash = await signed.submit();
+      console.log(`    ${txHash}`);
+      const all = await loadWallets();
+      const idx = all.findIndex(x => x.name === w.name);
+      if (idx >= 0) { all[idx].lastTxHash = txHash; await saveWallets(all); }
+    } catch (e) {
+      console.log(`    ✗ ${e.message ?? e}`);
+    }
+  }
+}
+
 async function cmdCancel(walletIdx) {
   const wallets = await loadWallets();
   const w = wallets[Number(walletIdx)];
@@ -700,6 +758,7 @@ const HELP = `Preprod batcher test harness.
   wait <i> [seconds]           Block until wallet i's pending orders all drain (default 180s)
   wait-all [seconds]           Block until every wallet's orders drain (default 240s)
   cancel <i>                   Cancel every pending order owned by wallet i
+  sweep <i|all> <destAddr>     Send entire balance (ADA + tokens) of wallet(s) to destAddr
 `;
 
 async function main() {
@@ -716,6 +775,7 @@ async function main() {
     case 'wait':   await cmdWait(args[0], Number(args[1]) || 180); break;
     case 'wait-all': await cmdWaitAll(Number(args[0]) || 240); break;
     case 'cancel': await cmdCancel(args[0]); break;
+    case 'sweep':  await cmdSweep(args[0], args[1]); break;
     case 'help':
     case '--help':
     case undefined:
