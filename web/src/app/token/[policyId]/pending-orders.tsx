@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useWallet } from '@/lib/wallet';
 import { decodeOrderDatum, type OrderDatum } from '@/lib/order-codec';
 import { getOrderBookAddress } from '@/lib/order-book';
@@ -107,6 +107,25 @@ export function PendingOrders({
     refetchInterval: 15_000,
     refetchOnWindowFocus: true,
   });
+
+  // Self-healing batcher trigger. The trade panel kicks /api/orders
+  // once on submit, but the lock tx may not be Blockfrost-indexed yet
+  // — that first tick sees no orders and exits. Locally there's no cron
+  // to retry. As long as this wallet has visible pending orders, kick
+  // every 15s; tickInFlight on the server collapses concurrent kicks,
+  // so this stays cheap. On Vercel deploys the /api/batcher/tick cron
+  // also fires; this gives us a self-contained dev-mode trigger that
+  // doesn't depend on cron at all.
+  const hasOrders = orders.length > 0;
+  useEffect(() => {
+    if (!hasOrders) return;
+    const kick = () => {
+      void fetch('/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+    };
+    kick();                                           // immediate on first appearance
+    const id = setInterval(kick, 15_000);             // and every 15s while pending
+    return () => clearInterval(id);
+  }, [hasOrders]);
 
   if (!QUEUE_ON || !wallet || orders.length === 0) return null;
 
