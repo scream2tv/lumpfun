@@ -37,11 +37,27 @@ function encodeOrderAction(a: OrderAction): Constr<never> {
 }
 
 // ── OrderDatum ────────────────────────────────────────────────────────────────
+// Aiken's Option<T> encodes as Constr 0 (None) or Constr 1 (Some, with
+// one field). Mirroring that for owner_stake so the batcher can pay back
+// to the user's full base address rather than an enterprise address.
+
+function encodeOptionByteArray(v: string | undefined): Constr<Data> {
+  return v ? new Constr(1, [v as Data]) : new Constr<Data>(0, []);
+}
+
+function decodeOptionByteArray(c: unknown): string | undefined {
+  if (!c || typeof c !== 'object') return undefined;
+  const o = c as { index?: number; fields?: unknown[] };
+  if (o.index === 0) return undefined;
+  if (o.index === 1 && o.fields && o.fields.length === 1) return o.fields[0] as string;
+  return undefined;
+}
 
 export function encodeOrderDatum(d: OrderDatum): string {
   return Data.to(
     new Constr(0, [
       d.ownerPkh,
+      encodeOptionByteArray(d.ownerStake),
       d.curvePolicyId,
       d.curveAssetName,
       encodeOrderAction(d.action),
@@ -53,23 +69,41 @@ export function encodeOrderDatum(d: OrderDatum): string {
   );
 }
 
+// Tolerates both 9-field (new) and 8-field (legacy) datums so any orders
+// at the order_book from before this migration remain decodable.
 export function decodeOrderDatum(raw: string): OrderDatum {
   const c = Data.from(raw) as Constr<unknown>;
-  if (c.index !== 0 || c.fields.length !== 8) {
-    throw new Error('Invalid OrderDatum encoding');
+  if (c.index !== 0) throw new Error('Invalid OrderDatum encoding (constr index)');
+
+  if (c.fields.length === 9) {
+    const actionConstr = c.fields[4] as Constr<never>;
+    return {
+      ownerPkh:        c.fields[0] as string,
+      ownerStake:      decodeOptionByteArray(c.fields[1]),
+      curvePolicyId:   c.fields[2] as string,
+      curveAssetName:  c.fields[3] as string,
+      action:          actionConstr.index === 0 ? 'Buy' : 'Sell',
+      amount:          c.fields[5] as bigint,
+      minOut:          c.fields[6] as bigint,
+      creatorPkh:      c.fields[7] as string,
+      treasuryPkh:     c.fields[8] as string,
+    };
   }
-  const actionConstr = c.fields[3] as Constr<never>;
-  const action: OrderAction = actionConstr.index === 0 ? 'Buy' : 'Sell';
-  return {
-    ownerPkh:        c.fields[0] as string,
-    curvePolicyId:   c.fields[1] as string,
-    curveAssetName:  c.fields[2] as string,
-    action,
-    amount:          c.fields[4] as bigint,
-    minOut:          c.fields[5] as bigint,
-    creatorPkh:      c.fields[6] as string,
-    treasuryPkh:     c.fields[7] as string,
-  };
+  if (c.fields.length === 8) {
+    const actionConstr = c.fields[3] as Constr<never>;
+    return {
+      ownerPkh:        c.fields[0] as string,
+      ownerStake:      undefined,
+      curvePolicyId:   c.fields[1] as string,
+      curveAssetName:  c.fields[2] as string,
+      action:          actionConstr.index === 0 ? 'Buy' : 'Sell',
+      amount:          c.fields[4] as bigint,
+      minOut:          c.fields[5] as bigint,
+      creatorPkh:      c.fields[6] as string,
+      treasuryPkh:     c.fields[7] as string,
+    };
+  }
+  throw new Error(`Invalid OrderDatum encoding (field count ${c.fields.length})`);
 }
 
 // ── OrderRedeemer ─────────────────────────────────────────────────────────────

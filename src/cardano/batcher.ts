@@ -91,7 +91,16 @@ async function executeOrder(
   const assetUnit = `${config.policyId}${config.assetName}`;
   const orderRedeemer = encodeOrderRedeemer('Execute');
   const network = lucid.config().network === 'Mainnet' ? 'Mainnet' : 'Preprod';
-  const ownerAddress = credentialToAddress(network, { type: 'Key', hash: order.ownerPkh });
+  // Pay trade outputs back to the user's full base address when the order
+  // datum carries a stake credential (new schema). Falls through to an
+  // enterprise address for legacy orders without one.
+  const ownerAddress = order.ownerStake
+    ? credentialToAddress(
+        network,
+        { type: 'Key', hash: order.ownerPkh },
+        { type: 'Key', hash: order.ownerStake },
+      )
+    : credentialToAddress(network, { type: 'Key', hash: order.ownerPkh });
 
   if (order.action === 'Buy') {
     const adaIn = order.amount;

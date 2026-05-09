@@ -33,6 +33,16 @@ function pkhFromBech32(addr: string): string {
   return d.paymentCredential.hash;
 }
 
+// Returns the stake-key hash (hex) for a base address, or undefined for
+// an enterprise-only wallet. Stored alongside ownerPkh in OrderDatum so
+// the batcher can reconstruct the user's full base address when paying
+// trade outputs back, instead of dropping the stake credential and
+// scattering tokens at an enterprise-only address.
+function stakeFromBech32(addr: string): string | undefined {
+  const d = getAddressDetails(addr);
+  return d.stakeCredential?.hash;
+}
+
 // ── Buy order ──────────────────────────────────────────────────────────────
 
 export interface BuyOrderParams {
@@ -82,6 +92,7 @@ export async function submitBuyOrder(
 
   const datum: OrderDatum = {
     ownerPkh,
+    ownerStake:     stakeFromBech32(walletAddr),
     curvePolicyId:  p.policyId,
     curveAssetName: p.assetName,
     action:         'Buy',
@@ -146,6 +157,7 @@ export async function submitSellOrder(
 
   const datum: OrderDatum = {
     ownerPkh,
+    ownerStake:     stakeFromBech32(walletAddr),
     curvePolicyId:  p.policyId,
     curveAssetName: p.assetName,
     action:         'Sell',

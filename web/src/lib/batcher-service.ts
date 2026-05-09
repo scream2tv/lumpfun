@@ -154,7 +154,7 @@ async function executeOneOrder(
   const assetUnit = `${meta.policyId}${meta.assetName}`;
   const orderRedeemer = encodeOrderRedeemer('Execute');
 
-  const ownerAddr = await deriveOwnerAddress(network, order.ownerPkh);
+  const ownerAddr = await deriveOwnerAddress(network, order.ownerPkh, order.ownerStake);
 
   if (order.action === 'Buy') {
     const adaIn     = order.amount;
@@ -228,8 +228,26 @@ async function executeOneOrder(
 
 // Lucid-Evolution exposes credentialToAddress via its top-level export.
 // Importing it lazily here keeps the bundle clean and avoids name clashes.
-async function deriveOwnerAddress(network: 'Mainnet' | 'Preprod', pkh: string): Promise<string> {
+//
+// When the order datum carries a stake credential (new schema), build the
+// full base address so trade outputs land at the user's main wallet
+// address. Legacy orders (8-field datum, no stake) fall through to an
+// enterprise address derived from the payment-key alone — same behaviour
+// as before this migration. Either way the seller can spend the output
+// because the payment key is the same.
+async function deriveOwnerAddress(
+  network: 'Mainnet' | 'Preprod',
+  pkh: string,
+  stakeHash?: string,
+): Promise<string> {
   const { credentialToAddress } = await import('@lucid-evolution/lucid');
+  if (stakeHash) {
+    return credentialToAddress(
+      network,
+      { type: 'Key', hash: pkh },
+      { type: 'Key', hash: stakeHash },
+    );
+  }
   return credentialToAddress(network, { type: 'Key', hash: pkh });
 }
 

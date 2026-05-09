@@ -106,27 +106,57 @@ const PLATFORM_FEE      = 1_000_000n;
 const MIN_UTXO_LOVELACE = 2_000_000n;
 const VIRTUAL_ADA       = 3_000_000_000n;
 
+function encodeOptionByteArray(v) {
+  return v ? new Constr(1, [v]) : new Constr(0, []);
+}
+function decodeOptionByteArray(c) {
+  if (!c || typeof c !== 'object') return undefined;
+  if (c.index === 0) return undefined;
+  if (c.index === 1 && c.fields?.length === 1) return c.fields[0];
+  return undefined;
+}
+
 function encodeOrderDatum(d) {
   const action = d.action === 'Buy' ? new Constr(0, []) : new Constr(1, []);
   return Data.to(new Constr(0, [
-    d.ownerPkh, d.curvePolicyId, d.curveAssetName,
+    d.ownerPkh,
+    encodeOptionByteArray(d.ownerStake),
+    d.curvePolicyId, d.curveAssetName,
     action, d.amount, d.minOut, d.creatorPkh, d.treasuryPkh,
   ]));
 }
 
+// Tolerates both 9-field (new) and 8-field (legacy) datums.
 function decodeOrderDatum(raw) {
   const c = Data.from(raw);
-  if (c.index !== 0 || c.fields.length !== 8) throw new Error('bad order datum');
-  return {
-    ownerPkh:       c.fields[0],
-    curvePolicyId:  c.fields[1],
-    curveAssetName: c.fields[2],
-    action:         c.fields[3].index === 0 ? 'Buy' : 'Sell',
-    amount:         c.fields[4],
-    minOut:         c.fields[5],
-    creatorPkh:     c.fields[6],
-    treasuryPkh:    c.fields[7],
-  };
+  if (c.index !== 0) throw new Error('bad order datum');
+  if (c.fields.length === 9) {
+    return {
+      ownerPkh:       c.fields[0],
+      ownerStake:     decodeOptionByteArray(c.fields[1]),
+      curvePolicyId:  c.fields[2],
+      curveAssetName: c.fields[3],
+      action:         c.fields[4].index === 0 ? 'Buy' : 'Sell',
+      amount:         c.fields[5],
+      minOut:         c.fields[6],
+      creatorPkh:     c.fields[7],
+      treasuryPkh:    c.fields[8],
+    };
+  }
+  if (c.fields.length === 8) {
+    return {
+      ownerPkh:       c.fields[0],
+      ownerStake:     undefined,
+      curvePolicyId:  c.fields[1],
+      curveAssetName: c.fields[2],
+      action:         c.fields[3].index === 0 ? 'Buy' : 'Sell',
+      amount:         c.fields[4],
+      minOut:         c.fields[5],
+      creatorPkh:     c.fields[6],
+      treasuryPkh:    c.fields[7],
+    };
+  }
+  throw new Error(`bad order datum (field count ${c.fields.length})`);
 }
 
 function encodeOrderRedeemerCancel() {
@@ -156,6 +186,11 @@ function pkhFromBech32(addr) {
   const d = getAddressDetails(addr);
   if (!d.paymentCredential?.hash) throw new Error(`No payment credential for ${addr.slice(0, 12)}…`);
   return d.paymentCredential.hash;
+}
+
+function stakeFromBech32(addr) {
+  const d = getAddressDetails(addr);
+  return d.stakeCredential?.hash;
 }
 
 // The batcher pays user trade-outputs to an *enterprise* address derived
@@ -360,6 +395,7 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
   // queue impact doesn't apply.
   const SLIPPAGE_BPS = slippageBpsArg ? BigInt(slippageBpsArg) : 1000n;
   const ownerPkh    = pkhFromBech32(w.address);
+  const ownerStake  = stakeFromBech32(w.address);
   const creatorPkh  = pkhFromBech32(token.creatorAddress);
   const treasuryPkh = pkhFromBech32(treasuryAddress);
   const obAddr      = await orderBookAddr();
@@ -372,7 +408,7 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
     const minOut = expectedOut - (expectedOut * SLIPPAGE_BPS) / 10_000n;
     const creatorFee = (adaIn * BigInt(token.creatorFeeBps)) / 10_000n;
     const lockedLovelace = adaIn + PLATFORM_FEE + creatorFee + MIN_UTXO_LOVELACE;
-    datum = { ownerPkh, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Buy', amount: adaIn, minOut, creatorPkh, treasuryPkh };
+    datum = { ownerPkh, ownerStake, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Buy', amount: adaIn, minOut, creatorPkh, treasuryPkh };
     value = { lovelace: lockedLovelace };
     console.log(`▶ ${w.name}  BUY  ${amount} tADA  →  ~${Number(expectedOut).toLocaleString()} $${token.ticker}  (locks ${(Number(lockedLovelace)/1e6).toFixed(2)} tADA)`);
   } else if (action === 'sell') {
@@ -382,7 +418,7 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
     const adaNet = grossAda - PLATFORM_FEE - creatorFee;
     const minOut = adaNet - (adaNet * SLIPPAGE_BPS) / 10_000n;
     if (adaNet < MIN_UTXO_LOVELACE) throw new Error('Sell amount too small — net below 1 ADA min UTxO');
-    datum = { ownerPkh, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Sell', amount: tokensIn, minOut, creatorPkh, treasuryPkh };
+    datum = { ownerPkh, ownerStake, curvePolicyId: token.policyId, curveAssetName: token.assetName, action: 'Sell', amount: tokensIn, minOut, creatorPkh, treasuryPkh };
     value = { lovelace: MIN_UTXO_LOVELACE, [assetUnit]: tokensIn };
     console.log(`▶ ${w.name}  SELL  ${Number(tokensIn).toLocaleString()} $${token.ticker}  →  ~${(Number(adaNet)/1e6).toFixed(2)} tADA net  (locks ${Number(tokensIn).toLocaleString()} tokens + min UTxO)`);
   } else {

@@ -24,7 +24,12 @@ export type OrderAction = 'Buy' | 'Sell';
 
 /** Datum locked in the order book contract for a pending order. */
 export interface OrderDatum {
-  ownerPkh: string;          // hex pubkey hash
+  ownerPkh: string;          // hex payment-key hash
+  /** Hex stake-key hash. Carries the seller's stake credential through the
+   *  order_book so the batcher can pay trade outputs back to the user's
+   *  full base address rather than an enterprise address derived from
+   *  ownerPkh alone. Undefined for enterprise-only wallets. */
+  ownerStake?: string;
   curvePolicyId: string;     // hex policy ID
   curveAssetName: string;    // hex asset name
   action: OrderAction;

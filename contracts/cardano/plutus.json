@@ -276,6 +276,29 @@
     "Int": {
       "dataType": "integer"
     },
+    "Option$ByteArray": {
+      "title": "Option",
+      "anyOf": [
+        {
+          "title": "Some",
+          "description": "An optional value.",
+          "dataType": "constructor",
+          "index": 0,
+          "fields": [
+            {
+              "$ref": "#/definitions/ByteArray"
+            }
+          ]
+        },
+        {
+          "title": "None",
+          "description": "Nothing.",
+          "dataType": "constructor",
+          "index": 1,
+          "fields": []
+        }
+      ]
+    },
     "cardano/transaction/OutputReference": {
       "title": "OutputReference",
       "description": "An `OutputReference` is a unique reference to an output on-chain. The `output_index`\n corresponds to the position in the output list of the transaction (identified by its id)\n that produced that output",
@@ -374,7 +397,7 @@
     },
     "lumpfun/types/OrderDatum": {
       "title": "OrderDatum",
-      "description": "Datum locked in the order book contract while a user's order is pending.",
+      "description": "Datum locked in the order book contract while a user's order is pending.\n\n owner_stake carries the seller's stake credential (when their wallet has\n one) so the batcher can return trade outputs to the user's full base\n address instead of the enterprise address derived from owner_pkh alone.\n Without this, every batcher payout creates a new enterprise UTxO at a\n distinct bech32 from the user's \"main\" address and tokens accumulated\n there are not delegated to any stake pool. None when the user trades\n from an enterprise-only wallet.",
       "anyOf": [
         {
           "title": "OrderDatum",
@@ -384,6 +407,10 @@
             {
               "title": "owner_pkh",
               "$ref": "#/definitions/ByteArray"
+            },
+            {
+              "title": "owner_stake",
+              "$ref": "#/definitions/Option$ByteArray"
             },
             {
               "title": "curve_policy_id",
