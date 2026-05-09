@@ -262,6 +262,24 @@ function QueuedBanner({
   const [cancelling, setCancelling] = useState(false);
   const [cancelErr,  setCancelErr]  = useState<string | null>(null);
 
+  // Self-healing batcher kick. The submit-time kick fires before
+  // Blockfrost has indexed the lock tx, so that first tick is a no-op.
+  // While this banner is mounted (i.e. the user has just submitted an
+  // order and hasn't dismissed it), kick /api/orders every 15s — by
+  // the second tick the order is visible and the batcher drains it.
+  // Independent of which wallet's PendingOrders panel is showing, so
+  // it works even if the user has switched accounts in their wallet
+  // between submit and confirmation. Server's tickInFlight semaphore
+  // collapses concurrent kicks; cost is negligible.
+  useEffect(() => {
+    const kick = () => {
+      void fetch('/api/orders', { method: 'POST', body: '{}' }).catch(() => { /* swallow */ });
+    };
+    kick();
+    const id = setInterval(kick, 15_000);
+    return () => clearInterval(id);
+  }, [hash]);
+
   return (
     <div
       className="rounded-lg p-3 flex items-start justify-between gap-2"
