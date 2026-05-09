@@ -22,6 +22,7 @@ interface HealthReport {
     NEXT_PUBLIC_CARDANO_NETWORK:      string | null;
     NEXT_PUBLIC_TREASURY_ADDRESS:     'set' | 'missing';
     TREASURY_SEED:                    'set' | 'missing';
+    BATCHER_SEED:                     'set' | 'missing';
     NEXT_PUBLIC_USE_QUEUE:             '1' | '0' | 'unset';
   };
   blockfrost: {
@@ -40,6 +41,7 @@ export async function GET() {
     NEXT_PUBLIC_CARDANO_NETWORK:       process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? null,
     NEXT_PUBLIC_TREASURY_ADDRESS:      process.env.NEXT_PUBLIC_TREASURY_ADDRESS    ? 'set' as const : 'missing' as const,
     TREASURY_SEED:                     process.env.TREASURY_SEED                   ? 'set' as const : 'missing' as const,
+    BATCHER_SEED:                      process.env.BATCHER_SEED                    ? 'set' as const : 'missing' as const,
     NEXT_PUBLIC_USE_QUEUE:             (process.env.NEXT_PUBLIC_USE_QUEUE === '1' ? '1' : process.env.NEXT_PUBLIC_USE_QUEUE === '0' ? '0' : 'unset') as '1' | '0' | 'unset',
   };
 
@@ -84,8 +86,11 @@ export async function GET() {
   if (bfStatus === 403 || bfStatus === 401) {
     hints.push('Blockfrost rejected the project_id. Check it matches the network (preprod*… vs mainnet*…) and is not exhausted.');
   }
-  if (env.TREASURY_SEED === 'missing' && env.NEXT_PUBLIC_USE_QUEUE === '1') {
-    hints.push('Queue mode is on but TREASURY_SEED is missing — the batcher cron route will throw on every tick.');
+  if (env.TREASURY_SEED === 'missing' && env.BATCHER_SEED === 'missing' && env.NEXT_PUBLIC_USE_QUEUE === '1') {
+    hints.push('Queue mode is on but neither BATCHER_SEED nor TREASURY_SEED is set — the batcher cron will throw every tick.');
+  }
+  if (env.NEXT_PUBLIC_USE_QUEUE === '1' && env.BATCHER_SEED === 'missing' && env.TREASURY_SEED === 'set') {
+    hints.push('Queue mode is on with TREASURY_SEED handling batcher signing. Consider setting a separate BATCHER_SEED so graduations and queue settlement use different wallets — limits blast radius if the batcher hot key leaks.');
   }
 
   const report: HealthReport = {

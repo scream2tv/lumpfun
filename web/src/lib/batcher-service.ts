@@ -3,9 +3,14 @@
 //
 // Trust model recap: orders are owner-cancellable at any time; the curve
 // validator independently enforces all math + fee invariants. The batcher
-// only provides liveness — it cannot seize funds. Reuses TREASURY_SEED to
-// pay tx fees and sign batcher txs (Phase-1 simplification; split keys
-// when we move to mainnet).
+// only provides liveness — it cannot seize funds. Signs with BATCHER_SEED
+// when set, falling back to TREASURY_SEED for backwards-compat with single-
+// seed deployments. The split matters for production: TREASURY_SEED also
+// signs graduations (graduate-server.ts), which means the signing wallet
+// ends up *holding* drained curve liquidity + Minswap LP tokens. Keeping
+// graduation routed to the real treasury and queue settlement routed to a
+// hot/replaceable batcher wallet limits blast radius if the batcher seed
+// is ever compromised.
 //
 // Settlement remains sequential per curve UTxO (one trade per block); the
 // gain over the direct-consume path is *concurrent user intent* + reliable
@@ -36,13 +41,16 @@ import { Data } from '@lucid-evolution/lucid';
 function env() {
   const network    = (process.env.CARDANO_NETWORK ?? process.env.NEXT_PUBLIC_CARDANO_NETWORK ?? 'Preprod') as 'Mainnet' | 'Preprod';
   const projectId  = process.env.BLOCKFROST_PROJECT_ID ?? '';
-  const seedPhrase = process.env.TREASURY_SEED ?? '';
+  // Prefer BATCHER_SEED when set (production: dedicated hot key for queue
+  // settlement). Fall back to TREASURY_SEED for single-seed dev/preprod
+  // setups where one wallet does everything.
+  const seedPhrase = process.env.BATCHER_SEED ?? process.env.TREASURY_SEED ?? '';
   const treasuryAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS ?? '';
   const baseUrl    = network === 'Mainnet'
     ? 'https://cardano-mainnet.blockfrost.io/api/v0'
     : 'https://cardano-preprod.blockfrost.io/api/v0';
   if (!projectId)       throw new Error('BLOCKFROST_PROJECT_ID not set');
-  if (!seedPhrase)      throw new Error('TREASURY_SEED not set');
+  if (!seedPhrase)      throw new Error('Neither BATCHER_SEED nor TREASURY_SEED set');
   if (!treasuryAddress) throw new Error('NEXT_PUBLIC_TREASURY_ADDRESS not set');
   return { network, projectId, seedPhrase, baseUrl, treasuryAddress };
 }
