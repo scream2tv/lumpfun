@@ -158,7 +158,19 @@ export async function submitSellOrder(
   const orderBook = getOrderBookAddress(NETWORK);
   const assetUnit = `${p.policyId}${p.assetName}`;
 
+  // Explicit coin selection. Lucid Evolution's auto-selection refuses to
+  // combine a wallet's UTxOs to satisfy a mixed-asset output (e.g. one
+  // ADA-only UTxO plus one ADA+token UTxO when the lock output needs both
+  // dimensions above the min-UTxO threshold). Pre-listing the wallet's
+  // utxos via collectFrom bypasses the algorithm and lets Lucid balance
+  // change from a known-sufficient input set. Without this, sells from
+  // sparse wallets (e.g. fresh wallet that just received tokens from the
+  // batcher and hasn't fragmented yet) fail with
+  // "Your wallet does not have enough funds to cover the required assets".
+  const walletUtxos = await lucid.wallet().getUtxos();
+
   const tx = await lucid.newTx()
+    .collectFrom(walletUtxos)
     .pay.ToAddressWithData(
       orderBook,
       { kind: 'inline', value: encodeOrderDatum(datum) },

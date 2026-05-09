@@ -158,6 +158,24 @@ function pkhFromBech32(addr) {
   return d.paymentCredential.hash;
 }
 
+// The batcher pays user trade-outputs to an *enterprise* address derived
+// from the user's payment-key hash alone (no stake credential), which is
+// a different bech32 from the user's base address (payment + stake).
+// Seed-based Lucid wallets default to the base address for getUtxos, so
+// token payouts are invisible to .wallet().getUtxos(). Real CIP-30
+// wallets aggregate both transparently. For our CLI to see them we have
+// to query the enterprise address manually and unify with the base set.
+async function fetchAllWalletUtxos(lucid, walletAddress) {
+  const { credentialToAddress } = await import('@lucid-evolution/lucid');
+  const network = (process.env.NEXT_PUBLIC_CARDANO_NETWORK === 'Mainnet' ? 'Mainnet' : 'Preprod');
+  const pkh = pkhFromBech32(walletAddress);
+  const entAddr = credentialToAddress(network, { type: 'Key', hash: pkh });
+  const baseUtxos = await lucid.wallet().getUtxos();
+  if (entAddr === walletAddress) return baseUtxos;
+  const entUtxos = await lucid.utxosAt(entAddr).catch(() => []);
+  return [...baseUtxos, ...entUtxos];
+}
+
 // ── Wallet persistence ────────────────────────────────────────────────────
 
 async function loadWallets() {
@@ -264,7 +282,10 @@ async function cmdStatus() {
   const tokenByPolicy = new Map(tokens.map(t => [`${t.policyId}${t.assetName}`, t]));
 
   for (const w of wallets) {
-    const utxos = await lucid.utxosAt(w.address).catch(() => []);
+    // Mirror the sell path — collect base + enterprise so token holdings
+    // (which the batcher delivers to enterprise) show up.
+    const lucidW = await lucidWith(w.seed);
+    const utxos = await fetchAllWalletUtxos(lucidW, w.address).catch(() => []);
     const lovelace = utxos.reduce((s, u) => s + (u.assets.lovelace ?? 0n), 0n);
 
     // Sum non-ADA assets, group by unit
@@ -368,7 +389,23 @@ async function cmdTrade(walletIdx, action, amount, ticker, slippageBpsArg) {
     throw new Error(`Unknown action '${action}'. Use 'buy' or 'sell'.`);
   }
 
-  const tx = await lucid.newTx()
+  // Explicit coin selection on sells. Two reasons we can't rely on Lucid's
+  // auto-selection here:
+  //   1. Lucid Evolution v0.4.30 refuses to combine sparse UTxOs (one
+  //      ADA-only + one ADA+token) to satisfy a mixed-asset output.
+  //   2. The batcher pays trade-outputs to an enterprise address derived
+  //      from the payment-key, distinct from the wallet's base address;
+  //      lucid.wallet().getUtxos() only sees the base address. We have to
+  //      union both ourselves.
+  // Pre-listing every wallet-controlled UTxO via collectFrom bypasses (1)
+  // and (2) at once. Buys don't need this hammer because they lock pure
+  // ADA which the base UTxO already has plenty of.
+  let txBuilder = lucid.newTx();
+  if (action === 'sell') {
+    const walletUtxos = await fetchAllWalletUtxos(lucid, w.address);
+    txBuilder = txBuilder.collectFrom(walletUtxos);
+  }
+  const tx = await txBuilder
     .pay.ToAddressWithData(obAddr, { kind: 'inline', value: encodeOrderDatum(datum) }, value)
     .complete();
   const signed = await tx.sign.withWallet().complete();
@@ -511,6 +548,17 @@ async function cmdCancel(walletIdx) {
 
   const lucid = await lucidWith(w.seed);
   const obAddr = await orderBookAddr();
+
+  // Await prev tx BEFORE fetching order_book UTxOs — otherwise a cancel
+  // that immediately follows a trade returns "no pending orders" because
+  // the lock tx hasn't been indexed yet, even though the order is in
+  // mempool. This is the cancel-race-test path.
+  if (w.lastTxHash) {
+    process.stdout.write(`  awaiting prev tx ${w.lastTxHash.slice(0, 12)}…  `);
+    try { await lucid.awaitTx(w.lastTxHash, 60_000); console.log('confirmed'); }
+    catch { console.log('still pending — proceeding anyway'); }
+  }
+
   const all = await lucid.utxosAt(obAddr);
   const ownerPkh = pkhFromBech32(w.address);
 
@@ -525,16 +573,6 @@ async function cmdCancel(walletIdx) {
 
   if (mine.length === 0) { console.log(`No pending orders for ${w.name}.`); return; }
   console.log(`▶ Cancelling ${mine.length} order(s) for ${w.name}`);
-
-  // Same await-prev guard as cmdTrade — a freshly-locked order isn't
-  // visible at order_book until its lock tx confirms; cancelling before
-  // confirmation produces a "no pending orders" no-op or, worse, a
-  // "all inputs are spent" race when both txs hit the same wallet UTxO.
-  if (w.lastTxHash) {
-    process.stdout.write(`  awaiting prev tx ${w.lastTxHash.slice(0, 12)}…  `);
-    try { await lucid.awaitTx(w.lastTxHash, 60_000); console.log('confirmed'); }
-    catch { console.log('still pending — proceeding anyway'); }
-  }
 
   const validator = await orderBookValidator();
   let lastCancelHash = null;
