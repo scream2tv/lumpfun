@@ -195,46 +195,57 @@ cardano-cli address build \
 `spectrum-cardano-lib`.) Verify a recent tx at that address on a block
 explorer (e.g. cardanoscan or `kupo`). Confirm it's active.
 
-### Task 0.2 — Live mempool watcher via Ogmios
+### Task 0.2 — Run the observation script
 
-Goal: subscribe to Ogmios's `AwaitAcquire`/`NextTransaction` for the
-mempool and log every tx that touches the snek pool or order script
-addresses. For each tx, capture:
+A working script already exists in this repo:
+`scripts/snek-mempool-watch.mjs`. It has three modes; run them in order.
 
-- tx hash
-- # of inputs at the order script address (this is the per-tx batch size)
-- # of inputs at the pool script address (should always be 1)
-- time from "saw in mempool" → "confirmed in block"
-- did multiple snek txs land in the same block on the same pool? (no = pure block-time chaining; yes = mempool chaining)
+**(a) Historical batch-size analysis via Kupo.** Confirms or refutes
+intra-tx batching without needing active trading:
 
-Skeleton Node script (no Rust needed for this task):
-
-```js
-// scripts/snek-mempool-watch.mjs
-import WebSocket from 'ws';
-
-const POOL_HASH  = '905ab869961b094f1b8197278cfe15b45cbe49fa8f32c6b014f85a2d';
-const ORDER_HASH = 'd9143ac63473b17a215d1b7484dfb6ac6b4a0005beb0e26a6ca02c96';
-
-const ws = new WebSocket('ws://127.0.0.1:1337');
-ws.on('open', () => {
-  ws.send(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'acquireMempool',
-    params: {},
-  }));
-});
-// then loop: queryMempool/nextTransaction until null, fold tx,
-// release+acquire to advance. Log per-tx counts of inputs at each addr.
+```bash
+node scripts/snek-mempool-watch.mjs --mode=kupo --hours=24
 ```
 
-Expected output (hypothesis):
+This pulls every spent order UTxO at snek's order script address from
+Kupo, groups by spending tx hash, and prints a histogram of orders/tx
+plus p50/p95/max. **Expected outcome:** average batch size >> 1
+(otherwise the source's intra-tx-batching claim is wrong and we
+re-plan).
 
-- N orders in a single tx (intra-tx batching) — confirms layer 1
-- Two snek txs in the same block on the same pool — confirms layer 2
+**(b) Live mempool watch via Ogmios.** Captures mempool→block latency:
 
-If we *don't* see either, the architecture is different from what the
-source suggests and we need to back up.
+```bash
+node scripts/snek-mempool-watch.mjs --mode=mempool --minutes=30
+```
+
+The script first asks Kupo for the bech32 forms of the pool script
+addresses (handles both enterprise and base credentials), then
+subscribes to Ogmios's `acquireMempool`/`nextTransaction` loop. Every
+tx whose outputs touch a known pool address is logged with first-seen
+timestamp. At end of run it cross-references back with Kupo for
+confirmation slot → computes p50/p95/max mempool→block latency.
+
+**(c) Both, in one go:**
+
+```bash
+node scripts/snek-mempool-watch.mjs --mode=both --hours=24 --minutes=30
+```
+
+All modes write a markdown report to `docs/snekfun-observation-log.md`
+(override with `--out=PATH`). Run during a busy snek.fun trading
+window for best signal — the project has quiet hours where there are
+no txs to observe.
+
+Expected outcomes (hypothesis):
+
+- Average batch size >> 1 (intra-tx batching exists)
+- p50 mempool→block latency under ~30s (consistent with chaining)
+- Possibly: two pool txs settled in the same block (definitive proof of
+  chaining)
+
+If we *don't* see large batch sizes, the architecture is different
+from what the source suggests and we re-plan before Phase 1.
 
 ### Task 0.3 — (Optional) Build and run snek-cardano-agent locally
 
