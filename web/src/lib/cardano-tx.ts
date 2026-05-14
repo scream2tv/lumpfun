@@ -512,11 +512,13 @@ export async function claimVestedTokens(
   const creatorPkh = getAddressDetails(walletAddr).paymentCredential?.hash;
   if (!creatorPkh) throw new Error('Cannot resolve creator pkh');
 
-  // Validity-range buffer: set validFrom to the larger of (unlockMs + 1s) and
-  // (now + a few seconds) so the slot conversion always lands strictly after
-  // the unlock without trying to use a slot in the past.
-  const validFrom = Math.max(unlockMs + 1_000, Date.now() + 5_000);
-  const validTo   = validFrom + 60 * 60 * 1_000; // 1h window
+  // validity_interval_start must be <= the node's current slot at submission
+  // time, otherwise the node rejects the tx as OutsideValidityIntervalUTxO
+  // (CIP-30 code -2 InternalError on submit). The validator only requires
+  // `t >= unlock_posix_ms`, so park validFrom at unlock + 1s — strictly after
+  // the unlock for the script, and strictly in the past for the node.
+  const validFrom = unlockMs + 1_000;
+  const validTo   = Date.now() + 60 * 60 * 1_000; // 1h window from now
 
   const signed = await lucid
     .newTx()
