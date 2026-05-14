@@ -21,6 +21,9 @@ contracts/cardano/aiken-compile.lock
 # Comment this out if you intentionally want to ship a registry snapshot.
 cardano-registry.json
 
+# One-off preprod cleanup utilities — kept locally, never shipped.
+web/scripts/preprod-test/sweep-test-wallets.mjs
+
 # tsbuildinfo
 *.tsbuildinfo
 .vercel
