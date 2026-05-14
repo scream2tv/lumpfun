@@ -203,6 +203,7 @@ function VestingRow({
 // ── Re-vest form ────────────────────────────────────────────────────────────
 
 const PRESETS = [
+  { label: '1 min',    ms: 60 * 1000 },
   { label: '1 hour',   ms: 60 * 60 * 1000 },
   { label: '24 hours', ms: 24 * 60 * 60 * 1000 },
   { label: '7 days',   ms: 7  * 24 * 60 * 60 * 1000 },
@@ -322,7 +323,7 @@ function ReVestForm({
         </span>
       </div>
 
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-5 gap-2">
         {PRESETS.map(p => {
           const active = presetMs === p.ms;
           return (

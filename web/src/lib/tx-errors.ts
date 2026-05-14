@@ -61,7 +61,18 @@ export function rawErrorString(e: unknown): string {
   if (e && typeof e === 'object') {
     const probed = probeNested(e);
     if (probed) return probed;
-    try { return JSON.stringify(e); } catch { /* fallthrough */ }
+    // Lucid Evolution / Effect throws class instances (TxBuilderError,
+    // TxSubmitError, FiberFailureError…) whose interesting state lives in
+    // non-enumerable own properties. A bare JSON.stringify(e) silently
+    // returns "{}" for those, which is what was surfacing to creators on
+    // failed claims. Mirror the Error-branch dump and at minimum surface
+    // the class name so the message is never just "{}".
+    const name = (e as { constructor?: { name?: string } }).constructor?.name ?? 'object';
+    try {
+      const dump = JSON.stringify(e, Object.getOwnPropertyNames(e)).slice(0, 1024);
+      if (dump && dump !== '{}') return `${name}: ${dump}`;
+    } catch { /* fallthrough */ }
+    return name;
   }
   return String(e);
 }
