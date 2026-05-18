@@ -1,7 +1,6 @@
 import { homedir } from 'os';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { queryIndexer } from './chain.js';
 
 const REGISTRY_PATH = join(homedir(), '.lumpfun', 'registry.json');
 
@@ -60,35 +59,11 @@ function saveLocal(records: LaunchRecord[]): void {
   writeFileSync(REGISTRY_PATH, JSON.stringify(records, null, 2));
 }
 
-async function queryRemoteByCodeHash(expectedHash?: string): Promise<LaunchRecord[]> {
-  // The preprod indexer's schema for contract listings isn't documented here;
-  // start with a best-effort query that fetches contract addresses and filters
-  // by the expected code hash if provided.
-  //
-  // The query shape below mirrors v3 indexer schema assumptions (may need
-  // adjustment after inspecting the actual preprod schema).
-  const query = `
-    query ListContracts {
-      contracts {
-        address
-        deployTxId
-        codeHash
-      }
-    }
-  `;
-  try {
-    const data = await queryIndexer(query) as { contracts?: Array<any> };
-    const rows = data.contracts ?? [];
-    const filtered = expectedHash
-      ? rows.filter((c) => c.codeHash === expectedHash)
-      : rows;
-    return filtered.map((c): LaunchRecord => ({
-      contractAddress: c.address,
-      deployTxId: c.deployTxId,
-      deployedAt: new Date(0).toISOString(),  // indexer may return a real ctime; adjust if so
-    }));
-  } catch {
-    // Schema mismatch or indexer unavailable — fall back to local-only.
-    return [];
-  }
+async function queryRemoteByCodeHash(_expectedHash?: string): Promise<LaunchRecord[]> {
+  // The v4 Midnight indexer has no top-level `contracts` listing — contract
+  // discovery requires walking blocks → transactions → contractActions and
+  // dedup'ing addresses, which is too expensive to do on every CLI invocation.
+  // For now, remote discovery is a no-op; local registry at ~/.lumpfun/registry.json
+  // is authoritative. Future work: maintain a server-side index keyed by code hash.
+  return [];
 }

@@ -152,7 +152,14 @@ export async function getTxByHash(
   hash: string,
   config?: MidnightConfig,
 ): Promise<Record<string, unknown> | null> {
-  const q = 'query ($hash: HexEncoded!) { transaction(hash: $hash) { hash blockHash blockHeight protocolVersion } }';
+  const q = `query ($hash: HexEncoded!) {
+    transactions(offset: { hash: $hash }) {
+      hash
+      protocolVersion
+      block { hash height }
+    }
+  }`;
   const result = await queryIndexer(q, { hash }, config);
-  return (result.transaction as Record<string, unknown> | null) ?? null;
+  const list = result.transactions as Array<Record<string, unknown>> | undefined;
+  return list?.[0] ?? null;
 }
