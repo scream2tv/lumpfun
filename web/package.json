@@ -12,6 +12,9 @@
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@lucid-evolution/lucid": "^0.4.30",
+    "@midnight-ntwrk/ledger-v8": "^8.0.2",
+    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.0",
+    "@midnight-ntwrk/wallet-sdk-hd": "3.0.1",
     "@minswap/sdk": "^0.5.0",
     "@spacebudz/lucid": "npm:@jsr/spacebudz__lucid@^0.20.14",
     "@tanstack/react-query": "^5.100.9",

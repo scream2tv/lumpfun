@@ -12,6 +12,9 @@ const nextConfig: NextConfig = {
     '@minswap/sdk',
     '@blockfrost/blockfrost-js',
     '@anastasia-labs/cardano-multiplatform-lib-nodejs',
+    '@midnight-ntwrk/ledger-v8',
+    '@midnight-ntwrk/wallet-sdk-hd',
+    '@midnight-ntwrk/wallet-sdk-address-format',
   ],
 };
 
