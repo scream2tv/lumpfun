@@ -1,0 +1,15 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Restart on crash; the proof server is stateless so re-bootstrap is cheap.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# The proof server binds to 6300 inside the container. Railway routes inbound
+# traffic to whatever port the service declares — set this so the generated
+# public URL terminates on the right port.
+[[deploy.ports]]
+port = 6300
+http = true
