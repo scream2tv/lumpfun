@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import {
   createWallet,
   initWallet,
+  initWalletKeysOnly,
   stopWallet,
   getBalances,
 } from './wallet.js';
@@ -140,9 +141,14 @@ launch
     '--creator-recipient <hex>',
     'hex Bytes<32>; defaults to deployer',
   )
+  .option('--no-sponsor', 'disable 1AM gas sponsorship; use local DUST wallet instead')
+  .option('--remote-submit-url <url>', 'override the gas-sponsor base URL (default: https://api-preprod.1am.xyz)')
+  .option('--remote-api-key <key>', 'override the gas-sponsor API key (env: ONEAM_API_KEY)')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (opts: any) => {
-    const w = await initWallet();
+    // Commander's --no-sponsor flips opts.sponsor to false. Default is sponsored.
+    const useSponsorship = opts.sponsor !== false;
+    const w = useSponsorship ? initWalletKeysOnly() : await initWallet();
     try {
       const creatorRecipient =
         opts.creatorRecipient ?? w.keys.shielded.keys.coinPublicKey;
@@ -166,6 +172,10 @@ launch
           platformRecipient: opts.platformRecipient,
           creatorRecipient,
         },
+      }, {
+        useGasSponsorship: useSponsorship,
+        remoteSubmitUrl: opts.remoteSubmitUrl,
+        remoteApiKey: opts.remoteApiKey,
       });
       recordLaunch({
         contractAddress: handle.contractAddress,
@@ -178,7 +188,8 @@ launch
       console.log(`Deployed ${handle.contractAddress}`);
       console.log(handle.explorerUrl);
     } finally {
-      await stopWallet(w);
+      // initWalletKeysOnly has no facade to stop; only stop the full-sync wallet.
+      if (!useSponsorship) await stopWallet(w);
     }
   });
 

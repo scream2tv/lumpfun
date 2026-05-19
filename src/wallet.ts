@@ -231,6 +231,35 @@ export interface InitializedWallet {
   addresses: WalletAddresses;
 }
 
+/**
+ * Lightweight wallet init that only derives keys — no chain sync, no
+ * WebSocket subscriptions, no DUST balance lookups.
+ *
+ * For use with the gas-sponsored deploy path (see src/night.ts), where the
+ * remote balancer (1AM) handles DUST + submission. Callers must NEVER touch
+ * `.facade` on the returned object — it's a `null` stub. The wallet's keys
+ * and keystore are real and usable for contract-intent signing.
+ */
+export function initWalletKeysOnly(walletDir?: string): InitializedWallet {
+  const config = getConfig();
+  if (process.env.LUMPFUN_ALLOW_MAINNET !== '1') assertPreprod();
+  setNetworkId(config.networkId);
+
+  const seed = loadSeed(walletDir);
+  const keys = deriveAllKeys(seed);
+  seed.fill(0);
+
+  const addresses = encodeAddresses(keys, config.networkId);
+  const unshieldedKeystore = createKeystore(keys.unshielded, config.networkId);
+
+  return {
+    facade: null as unknown as WalletFacade,
+    keys,
+    keystore: unshieldedKeystore,
+    addresses,
+  };
+}
+
 export async function initWallet(
   walletDir?: string,
   options?: { waitForSync?: boolean; syncTimeoutMs?: number },
@@ -337,30 +366,6 @@ function waitForSyncWithProgress(
       resolve('timeout');
     }, timeoutMs);
   });
-}
-
-/**
- * Lightweight wallet init that only derives keys — no chain sync.
- * Use with gas-sponsored flows where WalletFacade isn't needed.
- */
-export function initWalletKeysOnly(walletDir?: string): InitializedWallet {
-  const config = getConfig();
-  if (process.env.LUMPFUN_ALLOW_MAINNET !== '1') assertPreprod();
-  setNetworkId(config.networkId);
-  const seed = loadSeed(walletDir);
-  const keys = deriveAllKeys(seed);
-  seed.fill(0);
-
-  const addresses = encodeAddresses(keys, config.networkId);
-  const unshieldedKeystore = createKeystore(keys.unshielded, config.networkId);
-
-  // Return a stub facade — callers using gas sponsorship won't call facade methods
-  return {
-    facade: null as unknown as WalletFacade,
-    keys,
-    keystore: unshieldedKeystore,
-    addresses,
-  };
 }
 
 export async function stopWallet(wallet: InitializedWallet): Promise<void> {

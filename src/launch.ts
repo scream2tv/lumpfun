@@ -28,7 +28,7 @@ import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { assertPreprod, explorerLink } from './config.js';
 import { curveCostBuy, curvePayoutSell } from './curve.js';
 import { computeFeeSplit } from './fees.js';
-import { createContractProviders } from './night.js';
+import { createContractProviders, type CreateProvidersOptions } from './night.js';
 import type { InitializedWallet } from './wallet.js';
 
 // ─── Public domain types ─────────────────────────────────────────────────
@@ -277,11 +277,12 @@ function hexToBytes32(hex: string, label: string): Uint8Array {
 export async function deployLaunch(
   wallet: InitializedWallet,
   params: LaunchDeployParams,
+  options?: CreateProvidersOptions,
 ): Promise<LaunchHandle> {
   assertPreprod();
 
   const { compiledContract } = await loadAndWrapCompiledContract();
-  const providers = await createContractProviders(wallet, LUMP_LAUNCH_DIR);
+  const providers = await createContractProviders(wallet, LUMP_LAUNCH_DIR, options);
 
   const creatorPubkey = Buffer.from(
     wallet.keys.shielded.keys.coinPublicKey,

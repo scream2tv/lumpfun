@@ -15,21 +15,56 @@
 import type { InitializedWallet } from './wallet.js';
 import { getConfig, assertPreprod } from './config.js';
 
+export interface CreateProvidersOptions {
+  /**
+   * If true (default), skip the local WalletFacade's balanceUnboundTransaction
+   * path entirely and instead POST the proven tx to a remote balancer (1AM
+   * preprod by default). The remote service adds DUST input from its sponsor
+   * wallet, signs the fee, and submits to the node — no DUST registration on
+   * our side, no buggy SDK indexer-sync subscription. Requires only a
+   * keys-only wallet (initWalletKeysOnly).
+   *
+   * If false, use the historical local-balance path (requires a fully synced
+   * WalletFacade with DUST registered).
+   */
+  useGasSponsorship?: boolean;
+
+  /** Base URL of the remote balancer. Defaults to 1AM preprod. */
+  remoteSubmitUrl?: string;
+
+  /** Optional 1AM API key (X-API-Key header). Unauthenticated works but is
+   *  rate-limited. */
+  remoteApiKey?: string;
+}
+
 /**
  * Build the providers bag that @midnight-ntwrk/midnight-js-contracts expects
- * for deploy/connect, wired so that contract calls requiring unshielded
- * NIGHT inputs (e.g., `buy`) get matching UTXOs attached at tx-assembly
- * time.
+ * for deploy/connect.
  *
- * @param wallet — initialized via initWallet() from ./wallet.js
+ * Two modes, selected by `useGasSponsorship`:
+ *   - **sponsored (default)** — the walletProvider.balanceTx hook POSTs the
+ *     proven tx to ${remoteSubmitUrl}/balance-and-submit; the remote balancer
+ *     adds DUST and submits. submitTx returns the cached txHash.
+ *   - **local-balance** — the historical path; calls the local WalletFacade
+ *     to balance + sign DUST + submit. Requires a fully-synced facade.
+ *
+ * @param wallet — initWallet() for local-balance mode, initWalletKeysOnly() for sponsored.
  * @param zkConfigDir — absolute path to the compiled contract's managed dir
  *                      (e.g., contracts/managed/lump_launch)
  */
 export async function createContractProviders(
   wallet: InitializedWallet,
   zkConfigDir: string,
+  options?: CreateProvidersOptions,
 ) {
   assertPreprod();
+
+  const useSponsorship = options?.useGasSponsorship ?? true;
+  const remoteSubmitUrl =
+    options?.remoteSubmitUrl
+    ?? process.env.MIDNIGHT_REMOTE_SUBMIT_URL
+    ?? 'https://api-preprod.1am.xyz';
+  const remoteApiKey = options?.remoteApiKey ?? process.env.ONEAM_API_KEY;
 
   const { httpClientProofProvider } = await import(
     '@midnight-ntwrk/midnight-js-http-client-proof-provider'
@@ -44,57 +79,9 @@ export async function createContractProviders(
   const config = getConfig();
   const zkConfigProvider = new NodeZkConfigProvider(zkConfigDir);
 
-  const walletProvider = {
-    getCoinPublicKey: () => wallet.keys.shielded.keys.coinPublicKey,
-    getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
-
-    async balanceTx(tx: unknown, ttl?: Date) {
-      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE balance', tx);
-
-      const recipe = await wallet.facade.balanceUnboundTransaction(
-        tx as never,
-        {
-          shieldedSecretKeys: wallet.keys.shielded.keys,
-          dustSecretKey: wallet.keys.dust.key,
-        },
-        {
-          tokenKindsToBalance: 'all', // <-- the DR-1 fix; default 'dust' won't attach NIGHT
-          ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000),
-        },
-      );
-
-      if (process.env.LUMPFUN_DEBUG_TX === '1') {
-        dumpTx('AFTER balance (baseTransaction)', recipe.baseTransaction);
-        if (recipe.balancingTransaction) dumpTx('AFTER balance (balancingTransaction)', recipe.balancingTransaction);
-      }
-
-      const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
-
-      signTransactionIntents(
-        recipe.baseTransaction as TransactionWithIntents,
-        signFn,
-      );
-      if (recipe.balancingTransaction) {
-        signTransactionIntents(
-          recipe.balancingTransaction as TransactionWithIntents,
-          signFn,
-        );
-      }
-
-      if (process.env.LUMPFUN_DEBUG_TX === '1') {
-        dumpTx('AFTER sign (baseTransaction)', recipe.baseTransaction);
-        if (recipe.balancingTransaction) dumpTx('AFTER sign (balancingTransaction)', recipe.balancingTransaction);
-      }
-
-      const finalized = await wallet.facade.finalizeRecipe(recipe);
-
-      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER finalize', finalized);
-
-      return finalized;
-    },
-
-    submitTx: (tx: unknown) => wallet.facade.submitTransaction(tx as never),
-  };
+  const walletProvider = useSponsorship
+    ? buildSponsoredWalletProvider(wallet, remoteSubmitUrl, remoteApiKey)
+    : buildLocalWalletProvider(wallet);
 
   return {
     privateStateProvider: createInMemoryPrivateStateProvider(),
@@ -223,4 +210,156 @@ function signTransactionIntents(
       intent.guaranteedUnshieldedOffer = offer.addSignatures(sigs);
     }
   }
+}
+
+// ─── Wallet provider builders ───────────────────────────────────────────
+
+function buildLocalWalletProvider(wallet: InitializedWallet) {
+  return {
+    getCoinPublicKey: () => wallet.keys.shielded.keys.coinPublicKey,
+    getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
+
+    async balanceTx(tx: unknown, ttl?: Date) {
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE balance', tx);
+
+      const recipe = await wallet.facade.balanceUnboundTransaction(
+        tx as never,
+        {
+          shieldedSecretKeys: wallet.keys.shielded.keys,
+          dustSecretKey: wallet.keys.dust.key,
+        },
+        {
+          tokenKindsToBalance: 'all', // <-- the DR-1 fix; default 'dust' won't attach NIGHT
+          ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000),
+        },
+      );
+
+      if (process.env.LUMPFUN_DEBUG_TX === '1') {
+        dumpTx('AFTER balance (baseTransaction)', recipe.baseTransaction);
+        if (recipe.balancingTransaction) dumpTx('AFTER balance (balancingTransaction)', recipe.balancingTransaction);
+      }
+
+      const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
+
+      signTransactionIntents(recipe.baseTransaction as TransactionWithIntents, signFn);
+      if (recipe.balancingTransaction) {
+        signTransactionIntents(recipe.balancingTransaction as TransactionWithIntents, signFn);
+      }
+
+      if (process.env.LUMPFUN_DEBUG_TX === '1') {
+        dumpTx('AFTER sign (baseTransaction)', recipe.baseTransaction);
+        if (recipe.balancingTransaction) dumpTx('AFTER sign (balancingTransaction)', recipe.balancingTransaction);
+      }
+
+      const finalized = await wallet.facade.finalizeRecipe(recipe);
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER finalize', finalized);
+      return finalized;
+    },
+
+    submitTx: (tx: unknown) => wallet.facade.submitTransaction(tx as never),
+  };
+}
+
+/**
+ * Sponsored balancer: POST the proven tx to the remote balancer's
+ * /balance-and-submit endpoint. The remote service adds DUST from its
+ * sponsor wallet, signs the fee, submits to the node, and returns
+ * { txHash, contractAddresses }. We cache the txHash so submitTx can
+ * return it when the SDK calls it next.
+ *
+ * The DR-1 "attach unshielded NIGHT for buys/sells" concern is moot here
+ * because the local proofProvider has already produced the proven tx with
+ * the wallet's NIGHT inputs/outputs baked in; the remote balancer only
+ * adds the DUST fee input.
+ */
+function buildSponsoredWalletProvider(
+  wallet: InitializedWallet,
+  remoteSubmitUrl: string,
+  remoteApiKey?: string,
+) {
+  let cachedTxHash: string | null = null;
+  let cachedContractAddresses: Record<string, string> | undefined;
+
+  const provider = {
+    getCoinPublicKey: () => wallet.keys.shielded.keys.coinPublicKey,
+    getEncryptionPublicKey: () => wallet.keys.shielded.keys.encryptionPublicKey,
+
+    /** Exposed for callers that need the deploy's contract addresses. */
+    getContractAddresses: () => cachedContractAddresses,
+
+    async balanceTx(tx: unknown, _ttl?: Date) {
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE sponsored balance', tx);
+
+      const provenBytes = (tx as { serialize(): Uint8Array }).serialize();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/octet-stream',
+        'X-Client-Name': 'lumpfun',
+      };
+      if (remoteApiKey) headers['X-API-Key'] = remoteApiKey;
+
+      const url = `${remoteSubmitUrl}/balance-and-submit`;
+      const maxRetries = 5;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          console.log(`  POST ${url} (attempt ${attempt}/${maxRetries}) — ${provenBytes.length} bytes`);
+        }
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: provenBytes as unknown as BodyInit,
+        });
+        const respText = await resp.text();
+
+        if (resp.ok) {
+          const result = JSON.parse(respText) as {
+            tx?: string;
+            txHash?: string;
+            hash?: string;
+            txId?: string;
+            submitted?: boolean;
+            contractAddresses?: Record<string, string>;
+          };
+          const txHash = result.txHash ?? result.hash;
+          if (txHash) {
+            cachedTxHash = txHash;
+            cachedContractAddresses = result.contractAddresses;
+            if (process.env.LUMPFUN_DEBUG_TX === '1') {
+              console.log(`  sponsored submit ok: ${txHash}`);
+            }
+            return tx;
+          }
+        }
+
+        // Retry on transient errors with the server's hint.
+        let retryMs = 60_000;
+        try {
+          const err = JSON.parse(respText) as { retryAfterMs?: number; error?: string; message?: string };
+          if (typeof err.retryAfterMs === 'number') retryMs = err.retryAfterMs;
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  sponsored error (${resp.status}): ${err.error ?? ''} — ${err.message ?? respText.slice(0, 200)}`);
+          }
+        } catch {
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  sponsored error (${resp.status}): ${respText.slice(0, 200)}`);
+          }
+        }
+
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, retryMs));
+        }
+      }
+
+      throw new Error(`Sponsored deploy failed: ${url} exhausted ${maxRetries} retries`);
+    },
+
+    submitTx(_tx: unknown): Promise<string> {
+      if (!cachedTxHash) {
+        throw new Error('submitTx called before balanceTx in sponsored mode — order invariant violated');
+      }
+      return Promise.resolve(cachedTxHash);
+    },
+  };
+
+  return provider;
 }
