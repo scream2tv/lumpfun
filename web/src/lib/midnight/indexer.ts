@@ -7,9 +7,23 @@
  *
  * All fetches use `cache: 'no-store'` — Next.js's fetch dedup was returning
  * day-old responses in dev with revalidate hints.
+ *
+ * Endpoint selection:
+ *   - If BLOCKFROST_MIDNIGHT_KEY is set, route through Blockfrost's preprod
+ *     proxy with the project_id header (higher rate limits, paid SLA).
+ *   - Otherwise hit the public indexer directly (free, no auth).
+ *   - MIDNIGHT_INDEXER_URL overrides the default public URL only.
+ *
+ * Same v4 GraphQL schema in either case — Blockfrost is a proxy, not a
+ * separate API.
  */
 
-const INDEXER = 'https://indexer.preprod.midnight.network/api/v4/graphql';
+const PUBLIC_INDEXER = process.env.MIDNIGHT_INDEXER_URL
+  ?? 'https://indexer.preprod.midnight.network/api/v4/graphql';
+const BLOCKFROST_KEY = process.env.BLOCKFROST_MIDNIGHT_KEY;
+const BLOCKFROST_URL = 'https://midnight-preprod.blockfrost.io/api/v0';
+
+const ACTIVE_INDEXER = BLOCKFROST_KEY ? BLOCKFROST_URL : PUBLIC_INDEXER;
 
 const BLOCK_FIELDS = `
   hash
@@ -42,9 +56,12 @@ export interface MidnightBlock {
 export class IndexerError extends Error {}
 
 async function gql<T>(query: string): Promise<T> {
-  const res = await fetch(INDEXER, {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (BLOCKFROST_KEY) headers['project_id'] = BLOCKFROST_KEY;
+
+  const res = await fetch(ACTIVE_INDEXER, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ query }),
     cache: 'no-store',
   });
