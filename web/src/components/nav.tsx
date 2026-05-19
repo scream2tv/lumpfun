@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { WalletButton } from './wallet-button';
+import { ChainToggle } from './chain-toggle';
 
 export function Nav() {
   const [scrolled,  setScrolled]  = useState(false);
@@ -55,6 +56,11 @@ export function Nav() {
             </span>
           </Link>
 
+          {/* Chain toggle — Cardano (default) <-> Midnight preprod */}
+          <div className="hidden sm:flex shrink-0">
+            <ChainToggle />
+          </div>
+
           {/* Desktop nav links */}
           <nav className="hidden sm:flex items-center gap-1 flex-1">
             <NavLink href="/feed">Tokens</NavLink>
@@ -91,6 +97,7 @@ export function Nav() {
             boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
           }}
         >
+          <div className="px-2 pb-2"><ChainToggle /></div>
           <MobileLink href="/feed" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
           <MobileLink href="/create" onClick={() => setMenuOpen(false)}>+ Launch Token</MobileLink>
         </div>
