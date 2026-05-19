@@ -16,6 +16,210 @@ import type { InitializedWallet } from './wallet.js';
 import { getConfig, assertPreprod } from './config.js';
 import { rpcCall } from './chain.js';
 
+const NATIVE_TOKEN_TYPE = '0000000000000000000000000000000000000000000000000000000000000000';
+
+/**
+ * Walks recent indexer blocks for unspent native-NIGHT UTXOs owned by `address`.
+ *
+ * v0 implementation: scans the last `blocksBack` blocks. Adds new outputs to
+ * the candidate set, removes any spent in the same window. Good enough for
+ * a fresh preprod wallet whose funding tx is recent. Long-term: maintain a
+ * persistent index keyed by the wallet, or use the indexer's
+ * `unshieldedTransactions(address)` subscription stream.
+ *
+ * Returns native NIGHT UTXOs only; ignores other token types.
+ */
+interface UnspentUtxo {
+  intentHash: string;
+  outputIndex: number;
+  value: bigint;
+}
+
+async function fetchUnspentNightUtxos(
+  address: string,
+  blocksBack: number,
+): Promise<UnspentUtxo[]> {
+  const indexerUrl = getConfig().indexerUrl;
+  const headQuery = `{ b: block { height } }`;
+  const headRes = await fetch(indexerUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: headQuery }),
+  });
+  const headJson = (await headRes.json()) as { data?: { b?: { height: number } } };
+  const headHeightMaybe = headJson.data?.b?.height;
+  if (!headHeightMaybe) throw new Error('indexer: could not get head height');
+  const headHeight: number = headHeightMaybe;
+
+  const candidates = new Map<string, UnspentUtxo>(); // key = `${intentHash}:${outputIndex}`
+  const BATCH = 5;
+  const CONCURRENCY = 8;
+
+  const FIELDS = `
+    height
+    transactions {
+      hash
+      unshieldedCreatedOutputs { owner value tokenType intentHash outputIndex }
+      unshieldedSpentOutputs { intentHash outputIndex }
+    }
+  `;
+
+  const starts: number[] = [];
+  for (let s = 0; s < blocksBack; s += BATCH) starts.push(s);
+
+  async function scanBatch(start: number) {
+    const aliases: string[] = [];
+    for (let i = start; i < Math.min(start + BATCH, blocksBack); i++) {
+      const h = headHeight - i;
+      if (h <= 0) continue;
+      aliases.push(`b${i}: block(offset: { height: ${h} }) { ${FIELDS} }`);
+    }
+    if (aliases.length === 0) return;
+    const res = await fetch(indexerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: `{ ${aliases.join(' ')} }` }),
+    });
+    if (!res.ok) return;
+    const j = (await res.json()) as { data?: Record<string, {
+      transactions: Array<{
+        unshieldedCreatedOutputs: Array<{ owner: string; value: string; tokenType: string; intentHash: string; outputIndex: number }>;
+        unshieldedSpentOutputs: Array<{ intentHash: string; outputIndex: number }>;
+      }>;
+    } | null> };
+    if (!j.data) return;
+    for (const block of Object.values(j.data)) {
+      if (!block) continue;
+      for (const tx of block.transactions) {
+        for (const o of tx.unshieldedCreatedOutputs) {
+          if (o.owner === address && o.tokenType === NATIVE_TOKEN_TYPE) {
+            candidates.set(`${o.intentHash}:${o.outputIndex}`, {
+              intentHash: o.intentHash,
+              outputIndex: o.outputIndex,
+              value: BigInt(o.value),
+            });
+          }
+        }
+        for (const s of tx.unshieldedSpentOutputs) {
+          candidates.delete(`${s.intentHash}:${s.outputIndex}`);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < starts.length; i += CONCURRENCY) {
+    await Promise.all(starts.slice(i, i + CONCURRENCY).map(scanBatch));
+  }
+
+  // Largest-first sort makes single-input selection more likely.
+  return [...candidates.values()].sort((a, b) => (b.value > a.value ? 1 : -1));
+}
+
+function selectUtxosCovering(utxos: UnspentUtxo[], amount: bigint): UnspentUtxo[] | null {
+  // Try single largest first
+  for (const u of utxos) if (u.value >= amount) return [u];
+  // Greedy accumulation
+  const picked: UnspentUtxo[] = [];
+  let total = 0n;
+  for (const u of utxos) {
+    picked.push(u);
+    total += u.value;
+    if (total >= amount) return picked;
+  }
+  return null;
+}
+
+/**
+ * Attach native-NIGHT UTXO inputs to a proven tx so the chain accepts it.
+ *
+ * The proven tx's circuit declares `receiveUnshielded(NIGHT, X)` calls. The
+ * SDK's `httpClientProofProvider` proves the circuit but does NOT attach
+ * NIGHT UTXOs from the wallet — that's normally `wallet.facade
+ * .balanceUnboundTransaction(tokenKindsToBalance:'all')`'s job. Since our
+ * sponsored path skips the facade entirely (its sync is unreliable), we
+ * do the attachment here against the indexer's UTXO set.
+ *
+ * For each segment with a NIGHT deficit (from `tx.imbalances(segId)`):
+ *   - pick UTXOs covering the deficit
+ *   - construct an UnshieldedOffer (inputs + change output back to ourselves)
+ *   - assign to intent.guaranteedUnshieldedOffer
+ *
+ * The proven tx is mutated in place. Signatures are added afterward by
+ * `signTransactionIntents`.
+ */
+async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): Promise<void> {
+  const tx = provenTx as {
+    intents?: Map<number, IntentLike>;
+    imbalances?: (segment: number, fees?: bigint) => Map<string, bigint>;
+  };
+  if (!tx.intents || !tx.imbalances) return;
+
+  let needsAnyInput = false;
+  const perSegment = new Map<number, bigint>();
+  for (const segId of tx.intents.keys()) {
+    const im = tx.imbalances(segId);
+    let deficit = 0n;
+    for (const [tokenType, delta] of im.entries()) {
+      if (tokenType === NATIVE_TOKEN_TYPE && delta < 0n) deficit = -delta;
+    }
+    if (deficit > 0n) {
+      perSegment.set(segId, deficit);
+      needsAnyInput = true;
+    }
+  }
+  if (!needsAnyInput) return;
+
+  const blocksBack = Number(process.env.LUMPFUN_UTXO_SCAN_BLOCKS ?? '20000');
+  const utxos = await fetchUnspentNightUtxos(wallet.addresses.unshielded, blocksBack);
+  if (process.env.LUMPFUN_DEBUG_TX === '1') {
+    const total = utxos.reduce((a, u) => a + u.value, 0n);
+    console.log(`  attachNight: ${utxos.length} unspent NIGHT UTXOs found, total ${total}`);
+  }
+
+  const ledger = await import('@midnight-ntwrk/ledger-v8');
+  const verifyingKey = ledger.signatureVerifyingKey(wallet.keys.unshielded.toString('hex'));
+  const ourAddress = wallet.addresses.unshielded;
+
+  for (const [segId, deficit] of perSegment.entries()) {
+    const selected = selectUtxosCovering(utxos, deficit);
+    if (!selected) {
+      throw new Error(
+        `attachNightInputs: no unspent NIGHT UTXOs cover seg=${segId} deficit=${deficit}. ` +
+        `Wallet has ${utxos.reduce((a, u) => a + u.value, 0n)} NIGHT in ${utxos.length} UTXOs.`,
+      );
+    }
+    const total = selected.reduce((a, u) => a + u.value, 0n);
+    const change = total - deficit;
+
+    const inputs = selected.map(u => ({
+      value: u.value,
+      owner: verifyingKey,
+      type: NATIVE_TOKEN_TYPE,
+      intentHash: u.intentHash,
+      outputNo: u.outputIndex,
+    }));
+    const outputs = change > 0n
+      ? [{ value: change, owner: ourAddress, type: NATIVE_TOKEN_TYPE }]
+      : [];
+
+    if (process.env.LUMPFUN_DEBUG_TX === '1') {
+      console.log(`  attachNight: seg=${segId} deficit=${deficit} inputs=${inputs.length} change=${change}`);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const offer = (ledger as any).UnshieldedOffer.new(inputs, outputs, []);
+    const intent = tx.intents.get(segId);
+    if (!intent) continue;
+    intent.guaranteedUnshieldedOffer = offer;
+
+    // Remove the consumed UTXOs from the candidate pool for the next iteration.
+    const consumedKeys = new Set(selected.map(u => `${u.intentHash}:${u.outputIndex}`));
+    for (let i = utxos.length - 1; i >= 0; i--) {
+      if (consumedKeys.has(`${utxos[i].intentHash}:${utxos[i].outputIndex}`)) utxos.splice(i, 1);
+    }
+  }
+}
+
 /**
  * Submit a balanced Midnight transaction to the chain.
  *
@@ -358,6 +562,15 @@ function buildSponsoredWalletProvider(
 
     async balanceTx(tx: unknown, _ttl?: Date) {
       if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE sponsored balance', tx);
+
+      // 1AM only sponsors DUST fees. NIGHT inputs the circuit's
+      // receiveUnshielded calls require must come from our wallet — attach
+      // them here from the indexer's UTXO set, then sign.
+      await attachNightInputs(tx, wallet);
+      const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
+      signTransactionIntents(tx as TransactionWithIntents, signFn);
+
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER attach+sign', tx);
 
       const provenBytes = (tx as { serialize(): Uint8Array }).serialize();
       const headers: Record<string, string> = {
