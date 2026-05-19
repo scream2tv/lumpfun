@@ -12,64 +12,76 @@
  * See spikes/dr1_native_night/OUTCOME.md for the full rationale.
  */
 
-import { WebSocket } from 'ws';
 import type { InitializedWallet } from './wallet.js';
 import { getConfig, assertPreprod } from './config.js';
 import { rpcCall } from './chain.js';
 
 /**
- * Submit a hex-encoded extrinsic via the Midnight node's WebSocket RPC.
+ * Submit a balanced Midnight transaction to the chain.
  *
- * The public HTTP RPC at https://rpc.preprod.midnight.network/ returns 403
- * for write methods (author_submitExtrinsic, transaction_v1_broadcast).
- * The same methods work over WSS. The SDK's wallet.facade.submitTransaction
- * also goes through WSS for the same reason.
+ * `balancedHex` is the raw Midnight tx envelope (e.g. `0x6d69646e696768743a...`).
+ * It must be wrapped in a Substrate `Call::Midnight::sendMnTransaction(bytes)`
+ * extrinsic before submission — the chain's TaggedTransactionQueue rejects
+ * raw Midnight bytes with a wasm-trap. We use Polkadot.js to do the wrapping
+ * exactly the way the SDK's PolkadotNodeClient.sendMidnightTransaction does
+ * (see node_modules/@midnight-ntwrk/wallet-sdk-node-client/dist/effect/
+ * PolkadotNodeClient.js:78-94).
  */
-async function submitExtrinsicWss(wssUrl: string, hexExtrinsic: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wssUrl);
-    let settled = false;
+async function submitMidnightTransaction(wssUrl: string, balancedHex: string): Promise<string> {
+  const debug = process.env.LUMPFUN_DEBUG_TX === '1';
+  const log = (s: string) => { if (debug) console.log(`  [submit] ${s}`); };
 
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      try { ws.close(); } catch { /* noop */ }
-      reject(err);
-    };
+  log('importing @polkadot/api...');
+  const { ApiPromise, WsProvider } = await import('@polkadot/api');
 
-    const timeout = setTimeout(() => fail(new Error('WSS submit timed out after 30s')), 30_000);
+  log(`connecting WsProvider ${wssUrl}...`);
+  const provider = new WsProvider(wssUrl);
 
-    ws.on('open', () => {
-      ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'author_submitExtrinsic',
-        params: [hexExtrinsic],
-      }));
+  log('ApiPromise.create (pulling chain metadata, may take 10-30s)...');
+  const api = await ApiPromise.create({ provider, throwOnConnect: false, noInitWarn: true });
+  log(`api ready: chain=${(await api.rpc.system.chain()).toString()}`);
+
+  try {
+    if (!api.tx.midnight || typeof api.tx.midnight.sendMnTransaction !== 'function') {
+      throw new Error('Chain metadata has no api.tx.midnight.sendMnTransaction — pallet missing?');
+    }
+    const hex = balancedHex.startsWith('0x') ? balancedHex : `0x${balancedHex}`;
+    log(`constructing api.tx.midnight.sendMnTransaction(${hex.length} hex chars)...`);
+
+    // Polkadot.js's `.send(callback)` subscribes; the callback fires with
+    // status updates (Ready → Broadcast → InBlock → Finalized). The promise
+    // resolves to an unsubscribe thunk. We treat the first InBlock event
+    // (or a rejection) as the terminal status and return the tx hash.
+    const submission = api.tx.midnight.sendMnTransaction(hex);
+    const txHash = submission.hash.toHex();
+    log(`extrinsic hash (pre-submit): ${txHash}`);
+
+    return await new Promise<string>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('submit timed out after 60s')), 60_000);
+      let unsub: (() => void) | undefined;
+
+      submission
+        .send((result) => {
+          log(`status: ${result.status.type}`);
+          if (result.status.isInBlock || result.status.isFinalized) {
+            clearTimeout(t);
+            unsub?.();
+            resolve(txHash);
+          } else if (result.isError || result.status.isDropped || result.status.isInvalid) {
+            clearTimeout(t);
+            unsub?.();
+            reject(new Error(`submission rejected: ${result.status.type}`));
+          }
+        })
+        .then((u) => { unsub = u as () => void; })
+        .catch((err) => {
+          clearTimeout(t);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        });
     });
-
-    ws.on('message', (data: Buffer) => {
-      let msg: { id?: number; result?: string; error?: { code: number; message: string } };
-      try {
-        msg = JSON.parse(data.toString());
-      } catch (e) {
-        return fail(new Error(`WSS submit: malformed response: ${data.toString().slice(0, 200)}`));
-      }
-      if (msg.id !== 1) return;
-      clearTimeout(timeout);
-      settled = true;
-      ws.close();
-      if (msg.error) {
-        reject(new Error(`WSS submit RPC error ${msg.error.code}: ${msg.error.message}`));
-      } else if (typeof msg.result === 'string') {
-        resolve(msg.result);
-      } else {
-        reject(new Error('WSS submit: response had no result or error'));
-      }
-    });
-
-    ws.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))));
-  });
+  } finally {
+    await api.disconnect();
+  }
 }
 
 export interface CreateProvidersOptions {
@@ -400,16 +412,17 @@ function buildSponsoredWalletProvider(
             return tx;
           }
 
-          // Preprod /balance returns a balanced-but-unsubmitted hex tx. The
-          // public HTTPS RPC blocks write methods (403); submit over WSS.
-          const hexPayload = balancedHex.startsWith('0x') ? balancedHex : `0x${balancedHex}`;
+          // Preprod /balance returns a balanced-but-unsubmitted Midnight tx
+          // (hex of `midnight:transaction[v9](...)`). Wrap it in a Substrate
+          // Call::Midnight::sendMnTransaction extrinsic via Polkadot.js and
+          // submit over WSS (the public HTTPS RPC 403's write methods anyway).
           const wssUrl = getConfig().rpcWssUrl;
           if (process.env.LUMPFUN_DEBUG_TX === '1') {
-            console.log(`  submitting balanced tx via ${wssUrl} author_submitExtrinsic...`);
+            console.log(`  submitting balanced tx via ${wssUrl} api.tx.midnight.sendMnTransaction...`);
           }
-          const submitHash = await submitExtrinsicWss(wssUrl, hexPayload);
+          const submitHash = await submitMidnightTransaction(wssUrl, balancedHex);
           if (process.env.LUMPFUN_DEBUG_TX === '1') {
-            console.log(`  WSS submit ok: ${submitHash}`);
+            console.log(`  submit ok: extrinsic hash ${submitHash}`);
           }
           if (process.env.LUMPFUN_DEBUG_TX === '1') {
             console.log(`  RPC submit ok: ${txHash}`);
