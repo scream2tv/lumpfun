@@ -11,7 +11,17 @@ export async function GET() {
   }
 }
 
+// Mirrors LAUNCHES_PAUSED in app/create/page.tsx. Server-side guard so direct
+// API calls are rejected too, not just the UI. Flip both to re-enable.
+const LAUNCHES_PAUSED: boolean = true;
+
 export async function POST(req: Request) {
+  if (LAUNCHES_PAUSED) {
+    return NextResponse.json(
+      { error: 'Cardano launches are temporarily paused.' },
+      { status: 503 },
+    );
+  }
   const body: TokenMeta = await req.json();
   const result = await addToken(body);
   if (!result.ok) {

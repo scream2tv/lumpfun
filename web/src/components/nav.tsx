@@ -61,10 +61,10 @@ export function Nav() {
             <ChainToggle />
           </div>
 
-          {/* Desktop nav links */}
+          {/* Desktop nav links — /create temporarily hidden while
+              Cardano launches are paused. Re-add when LAUNCHES_PAUSED flips. */}
           <nav className="hidden sm:flex items-center gap-1 flex-1">
             <NavLink href="/feed">Tokens</NavLink>
-            <NavLink href="/create">Launch</NavLink>
           </nav>
 
           {/* Right: wallet + mobile hamburger */}
@@ -99,7 +99,6 @@ export function Nav() {
         >
           <div className="px-2 pb-2"><ChainToggle /></div>
           <MobileLink href="/feed" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
-          <MobileLink href="/create" onClick={() => setMenuOpen(false)}>+ Launch Token</MobileLink>
         </div>
       )}
     </>

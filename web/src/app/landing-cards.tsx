@@ -43,7 +43,7 @@ function HumanCard() {
       <CardShell
         onClick={handleClick}
         label="Human"
-        subtitle="Browse, trade, and launch tokens."
+        subtitle="Browse and trade tokens."
         accent="teal"
       />
       {open && <DisclaimerModal onAccept={accept} onClose={() => setOpen(false)} />}
