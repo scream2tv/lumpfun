@@ -154,20 +154,50 @@ async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): 
   };
   if (!tx.intents || !tx.imbalances) return;
 
+  // `imbalances()` returns a Map keyed by ledger-v8 `TokenType` (a tagged
+  // union: `{ tag: 'unshielded' | 'shielded' | 'dust', raw?: hex }`). We
+  // only care about the unshielded native token (raw === all-zeros). DUST
+  // deficits are 1AM's job; shielded tokens never appear here for buy/sell.
+  const isNativeUnshielded = (k: unknown): boolean => {
+    const t = k as { tag?: string; raw?: string };
+    return t?.tag === 'unshielded'
+      && typeof t.raw === 'string'
+      && t.raw.toLowerCase().replace(/^0x/, '') === NATIVE_TOKEN_TYPE;
+  };
+  const describeKey = (k: unknown): string => {
+    const t = k as { tag?: string; raw?: string };
+    if (t?.tag === 'dust') return 'dust';
+    if (t?.tag && t.raw) return `${t.tag}:${t.raw.slice(0, 12)}…`;
+    return JSON.stringify(t).slice(0, 30);
+  };
+
   let needsAnyInput = false;
   const perSegment = new Map<number, bigint>();
   for (const segId of tx.intents.keys()) {
-    const im = tx.imbalances(segId);
+    let im: Map<unknown, bigint>;
+    try {
+      im = tx.imbalances(segId) as Map<unknown, bigint>;
+    } catch (e) {
+      if (process.env.LUMPFUN_DEBUG_TX === '1') console.log(`  attachNight: imbalances(${segId}) threw: ${e}`);
+      continue;
+    }
+    if (process.env.LUMPFUN_DEBUG_TX === '1') {
+      const entries = [...im.entries()].map(([t, v]) => `${describeKey(t)}=${v}`).join(', ');
+      console.log(`  attachNight: seg=${segId} imbalances: ${entries || '<empty>'}`);
+    }
     let deficit = 0n;
     for (const [tokenType, delta] of im.entries()) {
-      if (tokenType === NATIVE_TOKEN_TYPE && delta < 0n) deficit = -delta;
+      if (isNativeUnshielded(tokenType) && delta < 0n) deficit = -delta;
     }
     if (deficit > 0n) {
       perSegment.set(segId, deficit);
       needsAnyInput = true;
     }
   }
-  if (!needsAnyInput) return;
+  if (!needsAnyInput) {
+    if (process.env.LUMPFUN_DEBUG_TX === '1') console.log(`  attachNight: no NIGHT deficit detected — nothing to attach`);
+    return;
+  }
 
   const blocksBack = Number(process.env.LUMPFUN_UTXO_SCAN_BLOCKS ?? '20000');
   const utxos = await fetchUnspentNightUtxos(wallet.addresses.unshielded, blocksBack);
@@ -178,7 +208,10 @@ async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): 
 
   const ledger = await import('@midnight-ntwrk/ledger-v8');
   const verifyingKey = ledger.signatureVerifyingKey(wallet.keys.unshielded.toString('hex'));
-  const ourAddress = wallet.addresses.unshielded;
+  // UtxoOutput.owner / UtxoSpend.owner take the raw 32-byte hex form, not the
+  // bech32 `mn_addr_preprod1...` we expose to users. addressFromKey gives the
+  // hex (same as our wallet-hex.ts utility).
+  const ourAddressHex = ledger.addressFromKey(verifyingKey);
 
   for (const [segId, deficit] of perSegment.entries()) {
     const selected = selectUtxosCovering(utxos, deficit);
@@ -199,7 +232,7 @@ async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): 
       outputNo: u.outputIndex,
     }));
     const outputs = change > 0n
-      ? [{ value: change, owner: ourAddress, type: NATIVE_TOKEN_TYPE }]
+      ? [{ value: change, owner: ourAddressHex, type: NATIVE_TOKEN_TYPE }]
       : [];
 
     if (process.env.LUMPFUN_DEBUG_TX === '1') {
@@ -211,6 +244,32 @@ async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): 
     const intent = tx.intents.get(segId);
     if (!intent) continue;
     intent.guaranteedUnshieldedOffer = offer;
+
+    // Step 1: did the setter on the local reference actually take?
+    const localPersists = !!intent.guaranteedUnshieldedOffer;
+    if (process.env.LUMPFUN_DEBUG_TX === '1') console.log(`  attachNight: local intent setter persisted=${localPersists}`);
+
+    // Step 2: write back into the Map.
+    (tx.intents as Map<number, IntentLike>).set(segId, intent);
+    if (process.env.LUMPFUN_DEBUG_TX === '1') {
+      const reGet = tx.intents.get(segId) as IntentLike | undefined;
+      console.log(`  attachNight: map.get after set persisted=${!!reGet?.guaranteedUnshieldedOffer}`);
+    }
+
+    // Step 3: if neither worked, try reassigning the whole intents map.
+    if (process.env.LUMPFUN_DEBUG_TX === '1') {
+      const fullTx = tx as { intents?: Map<number, IntentLike> };
+      const newMap = new Map<number, IntentLike>();
+      if (fullTx.intents) for (const [k, v] of fullTx.intents.entries()) newMap.set(k, k === segId ? intent : v);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (fullTx as any).intents = newMap;
+        const reGet2 = (fullTx.intents as Map<number, IntentLike> | undefined)?.get(segId);
+        console.log(`  attachNight: after reassigning whole intents map, persisted=${!!reGet2?.guaranteedUnshieldedOffer}`);
+      } catch (e) {
+        console.log(`  attachNight: reassign whole intents threw: ${e}`);
+      }
+    }
 
     // Remove the consumed UTXOs from the candidate pool for the next iteration.
     const consumedKeys = new Set(selected.map(u => `${u.intentHash}:${u.outputIndex}`));
@@ -356,6 +415,14 @@ export async function createContractProviders(
     ? buildSponsoredWalletProvider(wallet, remoteSubmitUrl, remoteApiKey)
     : buildLocalWalletProvider(wallet);
 
+  const baseProofProvider = httpClientProofProvider(config.proverUrl, zkConfigProvider);
+  // The proofProvider signature has narrow ledger-v8 types; the wrap is a
+  // generic intercept that doesn't care about exact shape.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proofProvider = useSponsorship
+    ? wrapProofProviderWithNightAttach(baseProofProvider as any, wallet)
+    : baseProofProvider;
+
   return {
     privateStateProvider: createInMemoryPrivateStateProvider(),
     publicDataProvider: indexerPublicDataProvider(
@@ -363,9 +430,32 @@ export async function createContractProviders(
       config.indexerWsUrl,
     ),
     zkConfigProvider,
-    proofProvider: httpClientProofProvider(config.proverUrl, zkConfigProvider),
+    proofProvider,
     walletProvider,
     midnightProvider: walletProvider,
+  };
+}
+
+/**
+ * Wraps the local proof provider so that, before proving, we attach
+ * unshielded NIGHT inputs the circuit demands. Writing to a tx's intents
+ * map only works while it's unbound + unproven (per the ledger-v8
+ * docstring), so this is the right seam — modifying after prove silently
+ * fails on the WASM-backed Map.
+ */
+function wrapProofProviderWithNightAttach(
+  base: { proveTx: (tx: unknown, ...rest: unknown[]) => Promise<unknown> },
+  wallet: InitializedWallet,
+) {
+  return {
+    ...base,
+    async proveTx(tx: unknown, ...rest: unknown[]) {
+      await attachNightInputs(tx, wallet);
+      const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
+      signTransactionIntents(tx as TransactionWithIntents, signFn);
+      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER attach+sign (pre-prove)', tx);
+      return base.proveTx(tx, ...rest);
+    },
   };
 }
 
@@ -563,14 +653,10 @@ function buildSponsoredWalletProvider(
     async balanceTx(tx: unknown, _ttl?: Date) {
       if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE sponsored balance', tx);
 
-      // 1AM only sponsors DUST fees. NIGHT inputs the circuit's
-      // receiveUnshielded calls require must come from our wallet — attach
-      // them here from the indexer's UTXO set, then sign.
-      await attachNightInputs(tx, wallet);
-      const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
-      signTransactionIntents(tx as TransactionWithIntents, signFn);
-
-      if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('AFTER attach+sign', tx);
+      // NIGHT input attachment + signing happen pre-prove via the wrapped
+      // proofProvider (see wrapProofProviderWithNightAttach). By the time
+      // we land here, the proven tx is structurally complete on the NIGHT
+      // side and we just need 1AM to add DUST + submit.
 
       const provenBytes = (tx as { serialize(): Uint8Array }).serialize();
       const headers: Record<string, string> = {
