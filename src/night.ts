@@ -12,8 +12,65 @@
  * See spikes/dr1_native_night/OUTCOME.md for the full rationale.
  */
 
+import { WebSocket } from 'ws';
 import type { InitializedWallet } from './wallet.js';
 import { getConfig, assertPreprod } from './config.js';
+import { rpcCall } from './chain.js';
+
+/**
+ * Submit a hex-encoded extrinsic via the Midnight node's WebSocket RPC.
+ *
+ * The public HTTP RPC at https://rpc.preprod.midnight.network/ returns 403
+ * for write methods (author_submitExtrinsic, transaction_v1_broadcast).
+ * The same methods work over WSS. The SDK's wallet.facade.submitTransaction
+ * also goes through WSS for the same reason.
+ */
+async function submitExtrinsicWss(wssUrl: string, hexExtrinsic: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wssUrl);
+    let settled = false;
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch { /* noop */ }
+      reject(err);
+    };
+
+    const timeout = setTimeout(() => fail(new Error('WSS submit timed out after 30s')), 30_000);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'author_submitExtrinsic',
+        params: [hexExtrinsic],
+      }));
+    });
+
+    ws.on('message', (data: Buffer) => {
+      let msg: { id?: number; result?: string; error?: { code: number; message: string } };
+      try {
+        msg = JSON.parse(data.toString());
+      } catch (e) {
+        return fail(new Error(`WSS submit: malformed response: ${data.toString().slice(0, 200)}`));
+      }
+      if (msg.id !== 1) return;
+      clearTimeout(timeout);
+      settled = true;
+      ws.close();
+      if (msg.error) {
+        reject(new Error(`WSS submit RPC error ${msg.error.code}: ${msg.error.message}`));
+      } else if (typeof msg.result === 'string') {
+        resolve(msg.result);
+      } else {
+        reject(new Error('WSS submit: response had no result or error'));
+      }
+    });
+
+    ws.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))));
+  });
+}
 
 export interface CreateProvidersOptions {
   /**
@@ -297,7 +354,11 @@ function buildSponsoredWalletProvider(
       };
       if (remoteApiKey) headers['X-API-Key'] = remoteApiKey;
 
-      const url = `${remoteSubmitUrl}/balance-and-submit`;
+      // Preprod 1AM exposes /balance (which returns the balanced tx hex with
+      // submitted:false). We submit it ourselves via RPC below. Mainnet 1AM
+      // additionally exposes /balance-and-submit; we may switch endpoints
+      // based on network later.
+      const url = `${remoteSubmitUrl}/balance`;
       const maxRetries = 5;
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -314,6 +375,7 @@ function buildSponsoredWalletProvider(
         if (resp.ok) {
           const result = JSON.parse(respText) as {
             tx?: string;
+            txBytes?: string;
             txHash?: string;
             hash?: string;
             txId?: string;
@@ -321,14 +383,41 @@ function buildSponsoredWalletProvider(
             contractAddresses?: Record<string, string>;
           };
           const txHash = result.txHash ?? result.hash;
-          if (txHash) {
+          // Preprod returns `txBytes`; mainnet spec says `tx`. Accept both.
+          const balancedHex = result.tx ?? result.txBytes;
+          if (!txHash || !balancedHex) {
+            throw new Error(`balancer response missing tx or txHash: ${respText.slice(0, 200)}`);
+          }
+
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  balanced: txHash=${txHash}, hex=${balancedHex.length} chars, submitted=${result.submitted}`);
+          }
+
+          if (result.submitted) {
+            // Mainnet 1AM's /balance-and-submit already broadcast; nothing more to do.
             cachedTxHash = txHash;
             cachedContractAddresses = result.contractAddresses;
-            if (process.env.LUMPFUN_DEBUG_TX === '1') {
-              console.log(`  sponsored submit ok: ${txHash}`);
-            }
             return tx;
           }
+
+          // Preprod /balance returns a balanced-but-unsubmitted hex tx. The
+          // public HTTPS RPC blocks write methods (403); submit over WSS.
+          const hexPayload = balancedHex.startsWith('0x') ? balancedHex : `0x${balancedHex}`;
+          const wssUrl = getConfig().rpcWssUrl;
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  submitting balanced tx via ${wssUrl} author_submitExtrinsic...`);
+          }
+          const submitHash = await submitExtrinsicWss(wssUrl, hexPayload);
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  WSS submit ok: ${submitHash}`);
+          }
+          if (process.env.LUMPFUN_DEBUG_TX === '1') {
+            console.log(`  RPC submit ok: ${txHash}`);
+          }
+
+          cachedTxHash = txHash;
+          cachedContractAddresses = result.contractAddresses;
+          return tx;
         }
 
         // Retry on transient errors with the server's hint.
