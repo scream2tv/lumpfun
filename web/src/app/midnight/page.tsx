@@ -1,55 +1,10 @@
 import { getWalletInfo, type WalletInfo } from '@/lib/midnight/wallet';
+import { getActivitySummary, type ActivitySummary } from '@/lib/midnight/indexer';
 import { CopyButton } from '@/components/copy-button';
 
-interface ContractActivity {
-  network: 'preprod';
-  fetchedAt: number;
-  blocks: Array<{
-    hash: string;
-    height: number;
-    timestamp: number;
-    author: string | null;
-    transactions: Array<{ hash: string; contractActions: Array<{ address: string }> }>;
-  }>;
-  uniqueContractAddresses: string[];
-}
-
-const INDEXER = 'https://indexer.preprod.midnight.network/api/v4/graphql';
-const BLOCK_FIELDS = 'hash height timestamp author transactions { hash contractActions { address } }';
-
-async function indexerQuery<T>(query: string): Promise<T> {
-  const res = await fetch(INDEXER, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`indexer ${res.status}`);
-  const json = (await res.json()) as { data?: T; errors?: Array<{ message: string }> };
-  if (json.errors?.length) throw new Error(json.errors.map(e => e.message).join('; '));
-  if (!json.data) throw new Error('indexer returned no data');
-  return json.data;
-}
-
-async function fetchActivity(): Promise<ContractActivity | { error: string }> {
+async function fetchActivity(): Promise<ActivitySummary | { error: string }> {
   try {
-    const head = (await indexerQuery<{ b0: ContractActivity['blocks'][number] | null }>(
-      `{ b0: block { ${BLOCK_FIELDS} } }`,
-    )).b0;
-    if (!head) return { error: 'no head block' };
-
-    const aliases = [1, 2, 3, 4].map(
-      i => `h${i}: block(offset: { height: ${head.height - i} }) { ${BLOCK_FIELDS} }`,
-    );
-    const rest = await indexerQuery<Record<string, ContractActivity['blocks'][number] | null>>(
-      `{ ${aliases.join(' ')} }`,
-    );
-    const blocks = [head, ...Object.values(rest).filter((b): b is ContractActivity['blocks'][number] => Boolean(b))];
-
-    const seen = new Set<string>();
-    for (const b of blocks) for (const tx of b.transactions) for (const a of tx.contractActions) seen.add(a.address);
-
-    return { network: 'preprod', fetchedAt: Date.now(), blocks, uniqueContractAddresses: [...seen] };
+    return await getActivitySummary(5);
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'unknown error' };
   }
@@ -171,7 +126,7 @@ export default async function MidnightLanding() {
             padding: 24,
             display: 'flex',
             flexDirection: 'column',
-            gap: 8,
+            gap: 10,
           }}
         >
           <span style={{ fontSize: 11, color: VIOLET, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em' }}>
@@ -180,10 +135,25 @@ export default async function MidnightLanding() {
           <h3 style={{ fontSize: 22, fontFamily: 'var(--font-outfit)', color: 'var(--text-bright)' }}>
             Launch a token on Midnight
           </h3>
-          <p style={{ color: 'var(--text-dim)', fontSize: 14, maxWidth: 540, lineHeight: 1.55 }}>
-            Server-signed deploy through the funded preprod wallet. Linear bonding curve, immutable fee split,
-            ZK-proved trades. Wallet funding and prover wiring are in progress.
+          <p style={{ color: 'var(--text-dim)', fontSize: 14, maxWidth: 580, lineHeight: 1.55 }}>
+            Linear bonding curve in native tNIGHT, immutable fee split, ZK-proved trades.
+            Fees are sponsored by{' '}
+            <a
+              href="https://1am.xyz/developers"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: VIOLET, textDecoration: 'underline', textDecorationStyle: 'dotted' }}
+            >
+              1AM
+            </a>
+            {' '}— zero DUST required from launchers or traders.
           </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <span style={{ width: 5, height: 5, borderRadius: 999, background: '#22c55e', boxShadow: '0 0 6px #22c55e' }} />
+            <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+              Wallet funded · prover wired · awaiting deploy route
+            </span>
+          </div>
         </section>
       </div>
     </div>

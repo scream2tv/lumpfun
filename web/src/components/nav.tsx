@@ -1,11 +1,14 @@
 'use client';
 
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { WalletButton } from './wallet-button';
 import { ChainToggle } from './chain-toggle';
 
 export function Nav() {
+  const pathname = usePathname();
+  const onMidnight = pathname.startsWith('/midnight');
   const [scrolled,  setScrolled]  = useState(false);
   const [menuOpen,  setMenuOpen]  = useState(false);
 
@@ -61,10 +64,14 @@ export function Nav() {
             <ChainToggle />
           </div>
 
-          {/* Desktop nav links — /create temporarily hidden while
-              Cardano launches are paused. Re-add when LAUNCHES_PAUSED flips. */}
+          {/* Desktop nav links — chain-aware. Cardano: Tokens (Launch is
+              paused). Midnight: Activity feed; launch is "coming soon". */}
           <nav className="hidden sm:flex items-center gap-1 flex-1">
-            <NavLink href="/feed">Tokens</NavLink>
+            {onMidnight ? (
+              <NavLink href="/midnight/feed">Activity</NavLink>
+            ) : (
+              <NavLink href="/feed">Tokens</NavLink>
+            )}
           </nav>
 
           {/* Right: wallet + mobile hamburger */}
@@ -98,7 +105,11 @@ export function Nav() {
           }}
         >
           <div className="px-2 pb-2"><ChainToggle /></div>
-          <MobileLink href="/feed" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
+          {onMidnight ? (
+            <MobileLink href="/midnight/feed" onClick={() => setMenuOpen(false)}>Activity</MobileLink>
+          ) : (
+            <MobileLink href="/feed" onClick={() => setMenuOpen(false)}>Tokens</MobileLink>
+          )}
         </div>
       )}
     </>
