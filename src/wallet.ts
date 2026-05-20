@@ -369,6 +369,92 @@ function waitForSyncWithProgress(
 }
 
 /**
+ * Poll the public indexer for unspent unshielded outputs at `address` until
+ * the total reaches `minAmount`. Sidesteps the SDK's wallet.unshielded.state
+ * observable which can be slow to populate on a freshly-initialized facade
+ * (the indexer subscription's startup latency varies, while a direct
+ * GraphQL query is consistently fast).
+ */
+export async function waitForUnshieldedBalanceViaIndexer(
+  address: string,
+  tokenTypeHex: string,
+  minAmount: bigint,
+  timeoutMs = 5 * 60 * 1000,
+  pollIntervalMs = 4_000,
+  blocksBack = 5_000,
+): Promise<bigint> {
+  const cfg = getConfig();
+  const indexerUrl = cfg.indexerUrl;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      // Find head height.
+      const headRes = await fetch(indexerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '{ b: block { height } }' }),
+      });
+      const headJson = await headRes.json() as { data?: { b?: { height: number } } };
+      const head = headJson.data?.b?.height;
+      if (!head) throw new Error('no head height');
+
+      // Sum unspent outputs in the window.
+      const BATCH = 5;
+      const CONCURRENCY = 8;
+      let total = 0n;
+      const spentKeys = new Set<string>();
+      const created = new Map<string, bigint>();
+      const starts: number[] = [];
+      for (let s = 0; s < blocksBack; s += BATCH) starts.push(s);
+
+      for (let i = 0; i < starts.length; i += CONCURRENCY) {
+        await Promise.all(starts.slice(i, i + CONCURRENCY).map(async (offset) => {
+          const aliases: string[] = [];
+          for (let j = offset; j < Math.min(offset + BATCH, blocksBack); j++) {
+            const h = head - j;
+            if (h <= 0) continue;
+            aliases.push(`b${j}: block(offset: { height: ${h} }) { transactions { unshieldedCreatedOutputs { owner value tokenType intentHash outputIndex } unshieldedSpentOutputs { intentHash outputIndex } } }`);
+          }
+          if (aliases.length === 0) return;
+          const res = await fetch(indexerUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: `{ ${aliases.join(' ')} }` }),
+          });
+          if (!res.ok) return;
+          const j = await res.json() as { data?: Record<string, { transactions: Array<{
+            unshieldedCreatedOutputs: Array<{ owner: string; value: string; tokenType: string; intentHash: string; outputIndex: number }>;
+            unshieldedSpentOutputs: Array<{ intentHash: string; outputIndex: number }>;
+          }> } | null> };
+          if (!j.data) return;
+          for (const block of Object.values(j.data)) {
+            if (!block) continue;
+            for (const tx of block.transactions) {
+              for (const o of tx.unshieldedCreatedOutputs) {
+                if (o.owner === address && o.tokenType === tokenTypeHex) {
+                  created.set(`${o.intentHash}:${o.outputIndex}`, BigInt(o.value));
+                }
+              }
+              for (const s of tx.unshieldedSpentOutputs) {
+                spentKeys.add(`${s.intentHash}:${s.outputIndex}`);
+              }
+            }
+          }
+        }));
+        // Early exit once we've accumulated enough.
+        let interim = 0n;
+        for (const [k, v] of created) if (!spentKeys.has(k)) interim += v;
+        if (interim >= minAmount) { total = interim; break; }
+      }
+      for (const [k, v] of created) if (!spentKeys.has(k)) total += v;
+      if (total >= minAmount) return total;
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+  }
+  throw new Error(`waitForUnshieldedBalanceViaIndexer timed out after ${timeoutMs}ms for ${address}`);
+}
+
+/**
  * Wait for the wallet's unshielded sub-wallet to observe at least `minAmount`
  * of a specific token. Lets us proceed as soon as the needed UTXOs are
  * available, without waiting for shielded/DUST sync to complete.

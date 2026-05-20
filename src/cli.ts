@@ -166,19 +166,74 @@ wallet
     }
 
     try {
+      // Inspect a recipe's intents for at least one unshielded offer output.
+      // The wallet's first transferTransaction after a fresh init can silently
+      // produce an empty offer — 1AM still balances + submits, the tx lands
+      // as a DUST-only no-op, and the recipient gets nothing. Catch + retry.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const recipeHasOutputs = (recipe: any): boolean => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tx = recipe?.transaction ?? recipe?.baseTransaction;
+        if (!tx?.intents) return false;
+        for (const [, intent] of tx.intents) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const ints = intent as any;
+          for (const offer of [ints.guaranteedUnshieldedOffer, ints.fallibleUnshieldedOffer]) {
+            if (offer && offer.outputs && offer.outputs.length > 0) return true;
+          }
+        }
+        return false;
+      };
+
+      const buildRecipe = async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (w.facade as any).transferTransaction(
+          [{
+            type: 'unshielded',
+            outputs: [{ amount, receiverAddress: targets[0].decoded, type: ledger.nativeToken().raw }],
+          }],
+          { shieldedSecretKeys: w.keys.shielded.keys, dustSecretKey: w.keys.dust.key },
+          { ttl: new Date(Date.now() + 30 * 60 * 1000), payFees: false },
+        );
+      };
+
+      // Warm-up: build a throwaway recipe so the wallet's first-call no-op
+      // happens on a discarded recipe instead of the real first transfer.
+      console.log('Warming up wallet (discarded first recipe)...');
+      try {
+        const warm = await buildRecipe();
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          console.log(`  warm-up recipe has outputs: ${recipeHasOutputs(warm)}`);
+        }
+      } catch (e) {
+        console.log(`  warm-up failed (non-fatal): ${e instanceof Error ? e.message : e}`);
+      }
+
       for (let idx = 0; idx < targets.length; idx++) {
         const t = targets[idx];
         console.log(`\n→ agent-${t.index} (${t.bech.slice(0, 24)}…)`);
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const recipe = await (w.facade as any).transferTransaction(
-            [{
-              type: 'unshielded',
-              outputs: [{ amount, receiverAddress: t.decoded, type: ledger.nativeToken().raw }],
-            }],
-            { shieldedSecretKeys: w.keys.shielded.keys, dustSecretKey: w.keys.dust.key },
-            { ttl: new Date(Date.now() + 30 * 60 * 1000), payFees: false },
-          );
+          let recipe: any;
+          const maxRecipeRetries = 3;
+          for (let attempt = 1; attempt <= maxRecipeRetries; attempt++) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            recipe = await (w.facade as any).transferTransaction(
+              [{
+                type: 'unshielded',
+                outputs: [{ amount, receiverAddress: t.decoded, type: ledger.nativeToken().raw }],
+              }],
+              { shieldedSecretKeys: w.keys.shielded.keys, dustSecretKey: w.keys.dust.key },
+              { ttl: new Date(Date.now() + 30 * 60 * 1000), payFees: false },
+            );
+            if (recipeHasOutputs(recipe)) break;
+            if (attempt < maxRecipeRetries) {
+              console.log(`  recipe attempt ${attempt}: empty unshielded offer; retrying in 10s...`);
+              await new Promise((r) => setTimeout(r, 10_000));
+            } else {
+              throw new Error('transferTransaction produced empty unshielded offer after 3 attempts');
+            }
+          }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const signed = await (w.facade as any).signRecipe(recipe, (payload: Uint8Array) => w.keystore.signData(payload));
 
