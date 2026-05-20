@@ -308,7 +308,9 @@ wallet
     const { join } = await import('path');
     const { existsSync, readdirSync } = await import('fs');
     const ledger = await import('@midnight-ntwrk/ledger-v8');
-    const { waitForUnshieldedBalance } = await import('./wallet.js');
+    const { waitForUnshieldedBalance, waitForUnshieldedBalanceViaIndexer, loadSeed, deriveAllKeys, encodeAddresses } = await import('./wallet.js');
+    const { getConfig: gc } = await import('./config.js');
+    const cfg = gc();
 
     const baseDir = join(homedir(), '.lumpfun', 'agents');
     if (!existsSync(baseDir)) {
@@ -357,10 +359,31 @@ wallet
 
       console.log(`\n[#${actionCount + 1}] agent-${agent.index} → ${side} ${effectiveTokens} (inv=${inv})`);
 
+      // Pre-check via indexer: skip agents that genuinely have no on-chain
+      // funding without sinking ~minutes on a facade sub-wallet that will
+      // never resolve. Cheap (~1-2s).
+      try {
+        const seed = loadSeed(agent.dir);
+        const keys = deriveAllKeys(seed);
+        seed.fill(0);
+        const agentAddr = encodeAddresses(keys, cfg.networkId).unshielded;
+        await waitForUnshieldedBalanceViaIndexer(agentAddr, nativeToken, minNightBalance, 30_000, 4_000, 5000);
+      } catch (e) {
+        console.error(`  ✗ agent-${agent.index} has no on-chain unshielded balance — skipping`);
+        if (actionCount < maxActions) {
+          const sleepMs = rand(opts.minInterval, opts.maxInterval) * 1000;
+          console.log(`  sleep ${(sleepMs / 1000).toFixed(0)}s…`);
+          await new Promise((r) => setTimeout(r, sleepMs));
+        }
+        continue;
+      }
+
       try {
         const w = await initWallet(agent.dir, { waitForSync: false });
         try {
-          await waitForUnshieldedBalance(w, nativeToken, minNightBalance, 15 * 60 * 1000);
+          // Indexer confirmed UTXOs exist; now give facade a generous window
+          // to subscribe + observe them (typically <60s but can spike).
+          await waitForUnshieldedBalance(w, nativeToken, minNightBalance, 10 * 60 * 1000);
           const handle = await connectLaunch(w, opts.contract);
           if (side === 'buy') {
             const r = await buy(w, handle, effectiveTokens);
