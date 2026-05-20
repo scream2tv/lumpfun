@@ -148,11 +148,26 @@ wallet
     });
 
     const amount = BigInt(opts.amount);
+    const required = amount * BigInt(targets.length);
     console.log(`Funding ${targets.length} agent(s) with ${amount} atoms each (${(Number(amount) / 1e6).toFixed(6)} tNIGHT).`);
-    console.log('Initializing main wallet — full sync required (~25-40 min cold start)...');
-    const w = await initWallet();
+    console.log('Initializing main wallet (no global sync wait)...');
+    const w = await initWallet(undefined, { waitForSync: false });
+
+    const { waitForUnshieldedBalance } = await import('./wallet.js');
+    const nativeToken = ledger.nativeToken().raw;
+    console.log(`Waiting for unshielded NIGHT balance >= ${required} atoms (just unshielded sub-wallet, not shielded/DUST)...`);
     try {
-      for (const t of targets) {
+      const balance = await waitForUnshieldedBalance(w, nativeToken, required, 10 * 60 * 1000);
+      console.log(`Unshielded NIGHT ready: ${balance} atoms.`);
+    } catch (e) {
+      console.error('Timed out waiting for unshielded balance:', e instanceof Error ? e.message : String(e));
+      await stopWallet(w);
+      process.exit(1);
+    }
+
+    try {
+      for (let idx = 0; idx < targets.length; idx++) {
+        const t = targets[idx];
         console.log(`\n→ agent-${t.index} (${t.bech.slice(0, 24)}…)`);
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,12 +181,28 @@ wallet
           );
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const signed = await (w.facade as any).signRecipe(recipe, (payload: Uint8Array) => w.keystore.signData(payload));
+
+          // Recipe shape varies by source:
+          //   balanceUnboundTransaction → UnboundTransactionRecipe { baseTransaction, ... }
+          //   transferTransaction       → UnprovenTransactionRecipe { transaction }
+          // Pick whichever exists.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const baseTx = (signed as any).baseTransaction;
-          if (!baseTx) throw new Error('signed.baseTransaction undefined');
-          const bytes = baseTx.serialize();
+          const s = signed as any;
+          const txObj = s.baseTransaction ?? s.transaction;
+          if (!txObj) {
+            throw new Error(`signed recipe missing baseTransaction and transaction (type=${s.type ?? 'unknown'}, keys=${Object.keys(s).join(',')})`);
+          }
+          const bytes = txObj.serialize();
           const result = await balanceAndSubmitViaSponsor(bytes, { debug: process.env.LUMPFUN_DEBUG_TX === '1' });
           console.log(`  tx: ${result.txHash}`);
+
+          // Wait for the wallet's unshielded sub-wallet to observe the on-chain
+          // change UTXO before building the next transfer; otherwise we trip
+          // InsufficientFunds when the SDK reads stale state. ~3 preprod blocks.
+          if (idx < targets.length - 1) {
+            console.log('  waiting 20s for unshielded state to refresh...');
+            await new Promise(r => setTimeout(r, 20_000));
+          }
         } catch (e) {
           console.error(`  agent-${t.index} failed:`, e instanceof Error ? e.message : String(e));
         }

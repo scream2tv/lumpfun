@@ -368,6 +368,34 @@ function waitForSyncWithProgress(
   });
 }
 
+/**
+ * Wait for the wallet's unshielded sub-wallet to observe at least `minAmount`
+ * of a specific token. Lets us proceed as soon as the needed UTXOs are
+ * available, without waiting for shielded/DUST sync to complete.
+ *
+ * Returns when unshielded balance >= minAmount, or throws on timeout.
+ */
+export async function waitForUnshieldedBalance(
+  wallet: InitializedWallet,
+  tokenTypeHex: string,
+  minAmount: bigint,
+  timeoutMs = 10 * 60 * 1000,
+): Promise<bigint> {
+  const { firstValueFrom, filter, timeout, map } = await import('rxjs');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unshielded = (wallet.facade as any).unshielded;
+  if (!unshielded?.state) {
+    throw new Error('wallet.facade.unshielded.state is not available — SDK shape unexpected');
+  }
+  const stream = unshielded.state.pipe(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    map((s: any) => BigInt((s?.balances?.[tokenTypeHex] ?? 0) as bigint | string | number)),
+    filter((b: bigint) => b >= minAmount),
+    timeout({ each: timeoutMs }),
+  );
+  return await firstValueFrom(stream);
+}
+
 export async function stopWallet(wallet: InitializedWallet): Promise<void> {
   await wallet.facade.stop();
 }
