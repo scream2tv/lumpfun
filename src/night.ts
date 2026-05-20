@@ -716,30 +716,20 @@ function buildSponsoredWalletProvider(
         const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const signed = await (wallet.facade as any).signRecipe(recipe, signFn);
-        const finalized = await wallet.facade.finalizeRecipe(signed);
-        if (process.env.LUMPFUN_DEBUG_TX === '1') {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const f = finalized as any;
-          const methods = ['bind', 'serialize', 'mockProve', 'eraseProofs', 'eraseSignatures', 'wellFormed'];
-          const present = methods.filter(m => typeof f?.[m] === 'function').join(',');
-          const ctor = f?.constructor?.name ?? typeof f;
-          const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(f) ?? {}).slice(0, 30).join(',');
-          console.log(`  finalize result: ctor=${ctor} methods=[${present}] proto=[${proto}]`);
-          const firstBytes = Buffer.from(f.serialize()).slice(0, 80);
-          const headerAscii = firstBytes.toString('utf-8').replace(/[^\x20-\x7e]/g, '.');
-          console.log(`  serialized header: ${headerAscii}`);
-        }
-        // Try .bind() if it exists; otherwise use finalized as-is.
+
+        // Send the signed recipe's baseTransaction (still PreBinding,
+        // proven) rather than the finalized+Binding tx. The deploy uses
+        // PreBinding bytes and 1AM accepts them; the Binding form trips
+        // the 'embedded-fr expected' rejection on /balance.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const f2 = finalized as any;
-        workingTx = typeof f2?.bind === 'function' ? f2.bind() : finalized;
+        workingTx = (signed as any).baseTransaction ?? signed;
         if (process.env.LUMPFUN_DEBUG_TX === '1') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const w = workingTx as any;
           const firstBytes = Buffer.from(w.serialize()).slice(0, 80);
           const headerAscii = firstBytes.toString('utf-8').replace(/[^\x20-\x7e]/g, '.');
-          console.log(`  post-bind serialized header: ${headerAscii}`);
-          dumpTx('AFTER facade signRecipe+finalize+bind', workingTx);
+          console.log(`  signed-recipe baseTransaction header: ${headerAscii}`);
+          dumpTx('AFTER facade signRecipe (using baseTransaction)', workingTx);
         }
       }
 
@@ -750,10 +740,17 @@ function buildSponsoredWalletProvider(
       };
       if (remoteApiKey) headers['X-API-Key'] = remoteApiKey;
 
-      // Preprod 1AM exposes /balance (which returns the balanced tx hex with
-      // submitted:false). We submit it ourselves via RPC below. Mainnet 1AM
-      // additionally exposes /balance-and-submit; we may switch endpoints
-      // based on network later.
+      // Endpoint selection: deploys (no NIGHT deficit) go to /balance with
+      // proven bytes — that's what the first LumpFun launch used successfully.
+      // Buy/sell would normally also use /balance after the facade attaches
+      // NIGHT inputs, but our SDK's finalized binding format ('pedersen-
+      // schnorr[v1]') doesn't match what 1AM preprod's /balance currently
+      // expects ('embedded-fr[v1]'). As a workaround, send the FACADE-
+      // balanced bytes to /prove-and-balance instead — that endpoint did
+      // accept our SDK format for deploy. 1AM re-runs prove + balance from
+      // their newer ledger.
+      // /balance for both deploy and buy/sell — deploy proves it accepts our
+      // SDK's wire format when the tx is PreBinding (proven, not finalized).
       const url = `${remoteSubmitUrl}/balance`;
       const maxRetries = 5;
 
