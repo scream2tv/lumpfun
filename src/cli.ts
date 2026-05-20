@@ -183,16 +183,39 @@ wallet
           const signed = await (w.facade as any).signRecipe(recipe, (payload: Uint8Array) => w.keystore.signData(payload));
 
           // Recipe shape varies by source:
-          //   balanceUnboundTransaction → UnboundTransactionRecipe { baseTransaction, ... }
+          //   balanceUnboundTransaction → UnboundTransactionRecipe { baseTransaction }
+          //     → use signed.baseTransaction directly (proof + PreBinding,
+          //       header signature[v1],proof,embedded-fr[v1] — what 1AM wants)
           //   transferTransaction       → UnprovenTransactionRecipe { transaction }
-          // Pick whichever exists.
+          //     → unproven UnprovenTransaction. Need to .prove() it (PreBinding
+          //       preserved) so the header becomes signature[v1],proof,embedded-fr.
+          //       finalizeRecipe would also produce a "bound" tx but with
+          //       pedersen-schnorr binding which 1AM rejects.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const s = signed as any;
-          const txObj = s.baseTransaction ?? s.transaction;
-          if (!txObj) {
-            throw new Error(`signed recipe missing baseTransaction and transaction (type=${s.type ?? 'unknown'}, keys=${Object.keys(s).join(',')})`);
+          let bytes: Uint8Array;
+          if (s.type === 'UNPROVEN_TRANSACTION') {
+            const cfg = getConfig();
+            const { httpClientProofProvider } = await import('@midnight-ntwrk/midnight-js-http-client-proof-provider');
+            const { NodeZkConfigProvider } = await import('@midnight-ntwrk/midnight-js-node-zk-config-provider');
+            const { resolve } = await import('path');
+            // For unshielded transfers there's no contract circuit to prove —
+            // the prover just passes through. ZK config dir doesn't matter
+            // structurally; point at the demo contract's managed dir as a
+            // placeholder.
+            const zkConfigProvider = new NodeZkConfigProvider(resolve(process.cwd(), 'contracts/managed/lump_launch'));
+            const proofProvider = httpClientProofProvider(cfg.proverUrl, zkConfigProvider);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const proven = await proofProvider.proveTx(s.transaction as any);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            bytes = (proven as any).serialize();
+          } else if (s.baseTransaction) {
+            bytes = s.baseTransaction.serialize();
+          } else if (s.transaction) {
+            bytes = s.transaction.serialize();
+          } else {
+            throw new Error(`signed recipe shape unexpected (type=${s.type ?? 'unknown'}, keys=${Object.keys(s).join(',')})`);
           }
-          const bytes = txObj.serialize();
           const result = await balanceAndSubmitViaSponsor(bytes, { debug: process.env.LUMPFUN_DEBUG_TX === '1' });
           console.log(`  tx: ${result.txHash}`);
 
