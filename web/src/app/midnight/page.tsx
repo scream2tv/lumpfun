@@ -1,5 +1,7 @@
+import Link from 'next/link';
 import { getWalletInfo, type WalletInfo } from '@/lib/midnight/wallet';
 import { getActivitySummary, type ActivitySummary } from '@/lib/midnight/indexer';
+import { listLaunches } from '@/lib/midnight/launches';
 import { CopyButton } from '@/components/copy-button';
 
 async function fetchActivity(): Promise<ActivitySummary | { error: string }> {
@@ -117,44 +119,94 @@ export default async function MidnightLanding() {
           </section>
         </div>
 
-        {/* Coming-soon launch card */}
-        <section
-          style={{
-            background: 'var(--bg-card)',
-            border: `1px dashed ${VIOLET}55`,
-            borderRadius: 12,
-            padding: 24,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <span style={{ fontSize: 11, color: VIOLET, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em' }}>
-            COMING SOON
-          </span>
-          <h3 style={{ fontSize: 22, fontFamily: 'var(--font-outfit)', color: 'var(--text-bright)' }}>
-            Launch a token on Midnight
-          </h3>
-          <p style={{ color: 'var(--text-dim)', fontSize: 14, maxWidth: 580, lineHeight: 1.55 }}>
-            Linear bonding curve in native tNIGHT, immutable fee split, ZK-proved trades.
-            Fees are sponsored by{' '}
-            <a
-              href="https://1am.xyz/developers"
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: VIOLET, textDecoration: 'underline', textDecorationStyle: 'dotted' }}
-            >
-              1AM
-            </a>
-            {' '}— zero DUST required from launchers or traders.
-          </p>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-            <span style={{ width: 5, height: 5, borderRadius: 999, background: '#22c55e', boxShadow: '0 0 6px #22c55e' }} />
-            <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-              Wallet funded · prover wired · awaiting deploy route
-            </span>
-          </div>
-        </section>
+        {/* Live launches */}
+        {(() => {
+          const launches = listLaunches('preprod');
+          if (launches.length === 0) {
+            return (
+              <section
+                style={{
+                  background: 'var(--bg-card)',
+                  border: `1px dashed ${VIOLET}55`,
+                  borderRadius: 12,
+                  padding: 24,
+                }}
+              >
+                <span style={{ fontSize: 11, color: VIOLET, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em' }}>
+                  COMING SOON
+                </span>
+                <h3 style={{ fontSize: 22, fontFamily: 'var(--font-outfit)', color: 'var(--text-bright)', marginTop: 8 }}>
+                  No launches yet
+                </h3>
+              </section>
+            );
+          }
+          return (
+            <section>
+              <h2
+                style={{
+                  fontFamily: 'var(--font-outfit)',
+                  fontSize: 13,
+                  color: 'var(--text-dim)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  marginBottom: 12,
+                }}
+              >
+                Live launches
+              </h2>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {launches.map(l => (
+                  <Link
+                    key={l.address}
+                    href={`/midnight/launch/${l.address}`}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr auto',
+                      gap: 16,
+                      padding: '16px 20px',
+                      background: 'var(--bg-card)',
+                      border: `1px solid ${VIOLET}33`,
+                      borderRadius: 12,
+                      textDecoration: 'none',
+                      color: 'inherit',
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontFamily: 'var(--font-outfit)', fontSize: 20, fontWeight: 600, color: 'var(--text-bright)' }}>
+                          {l.name}
+                        </span>
+                        <span style={{ fontSize: 12, color: VIOLET, fontFamily: 'var(--font-mono)' }}>${l.symbol}</span>
+                        {l.demo && (
+                          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', letterSpacing: '0.08em' }}>
+                            · DEMO
+                          </span>
+                        )}
+                      </div>
+                      <code style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-dim)' }}>
+                        {l.address.slice(0, 12)}…{l.address.slice(-8)}
+                      </code>
+                    </div>
+                    <span style={{ alignSelf: 'center', color: VIOLET, fontSize: 18, opacity: 0.6 }}>→</span>
+                  </Link>
+                ))}
+              </div>
+              <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 16, maxWidth: 580, lineHeight: 1.55 }}>
+                Trades on each launch are sponsored by{' '}
+                <a
+                  href="https://1am.xyz/developers"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: VIOLET, textDecoration: 'underline', textDecorationStyle: 'dotted' }}
+                >
+                  1AM
+                </a>
+                {' '}— zero DUST required.
+              </p>
+            </section>
+          );
+        })()}
       </div>
     </div>
   );
