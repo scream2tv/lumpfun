@@ -1,0 +1,28 @@
+{
+  "preprod": [
+    {
+      "address": "716b79a21d9f8fe0683d9e7d2cb4b9ac55ac2d6a085373ac84115f35f118b49b",
+      "name": "LumpDemo",
+      "symbol": "DEMO",
+      "decimals": 6,
+      "imageUri": "ipfs://placeholder",
+      "deployTxHash": "5aa87a0f82acf6e5062c3101c4b6627fb388e4ef8f27652a58a32ac43f824cf8",
+      "deployTxIdentifier": "0075464f39d967e8066a826b967b5e745773e722f26f8df5c1b24122517a2254c3",
+      "deployBlockHeight": 853090,
+      "deployedAt": "2026-05-19T21:39:24Z",
+      "creator": "b14903d30cdcbbd6bf8b06880585c2d64a09e709d4b11f20637a8108a219528a",
+      "curve": {
+        "basePriceNight": "1000",
+        "slopeNight": "1",
+        "maxSupply": "1000000"
+      },
+      "fees": {
+        "feeBps": 100,
+        "platformShareBps": 5000,
+        "creatorShareBps": 4000,
+        "referralShareBps": 1000
+      },
+      "demo": true
+    }
+  ]
+}
