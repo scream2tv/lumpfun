@@ -415,13 +415,7 @@ export async function createContractProviders(
     ? buildSponsoredWalletProvider(wallet, remoteSubmitUrl, remoteApiKey)
     : buildLocalWalletProvider(wallet);
 
-  const baseProofProvider = httpClientProofProvider(config.proverUrl, zkConfigProvider);
-  // The proofProvider signature has narrow ledger-v8 types; the wrap is a
-  // generic intercept that doesn't care about exact shape.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const proofProvider = useSponsorship
-    ? wrapProofProviderWithNightAttach(baseProofProvider as any, wallet)
-    : baseProofProvider;
+  const proofProvider = httpClientProofProvider(config.proverUrl, zkConfigProvider);
 
   return {
     privateStateProvider: createInMemoryPrivateStateProvider(),
@@ -635,6 +629,32 @@ function buildLocalWalletProvider(wallet: InitializedWallet) {
  * the wallet's NIGHT inputs/outputs baked in; the remote balancer only
  * adds the DUST fee input.
  */
+/**
+ * Probe a proven tx's `imbalances()` map for any shielded/unshielded deficit.
+ * Returns true if the tx requires the local wallet to attach NIGHT (or other
+ * non-DUST) inputs. Returns false for deploys and other no-transfer txs.
+ *
+ * Token-type key shape: `{ tag: 'unshielded' | 'shielded' | 'dust', raw?: hex }`.
+ */
+function hasShieldedOrUnshieldedDeficit(tx: unknown): boolean {
+  const t = tx as {
+    intents?: Map<number, unknown>;
+    imbalances?: (segment: number) => Map<unknown, bigint>;
+  };
+  if (!t.intents || !t.imbalances) return false;
+  for (const segId of t.intents.keys()) {
+    let im: Map<unknown, bigint>;
+    try {
+      im = t.imbalances(segId);
+    } catch { continue; }
+    for (const [tokenType, delta] of im.entries()) {
+      const tt = tokenType as { tag?: string };
+      if ((tt?.tag === 'unshielded' || tt?.tag === 'shielded') && delta < 0n) return true;
+    }
+  }
+  return false;
+}
+
 function buildSponsoredWalletProvider(
   wallet: InitializedWallet,
   remoteSubmitUrl: string,
@@ -650,15 +670,80 @@ function buildSponsoredWalletProvider(
     /** Exposed for callers that need the deploy's contract addresses. */
     getContractAddresses: () => cachedContractAddresses,
 
-    async balanceTx(tx: unknown, _ttl?: Date) {
+    async balanceTx(tx: unknown, ttl?: Date) {
       if (process.env.LUMPFUN_DEBUG_TX === '1') dumpTx('BEFORE sponsored balance', tx);
 
-      // NIGHT input attachment + signing happen pre-prove via the wrapped
-      // proofProvider (see wrapProofProviderWithNightAttach). By the time
-      // we land here, the proven tx is structurally complete on the NIGHT
-      // side and we just need 1AM to add DUST + submit.
+      // Hybrid balance: if this tx has any shielded/unshielded deficit (e.g.
+      // a buy/sell with native NIGHT inputs the circuit consumes), have the
+      // local WalletFacade attach them via balanceUnboundTransaction with
+      // tokenKindsToBalance:['shielded','unshielded']. That deliberately
+      // excludes DUST so we don't need DUST sync — 1AM /balance pays the fee.
+      // For deploys (no NIGHT transfers), this branch is skipped entirely
+      // and the proven tx goes straight to 1AM.
+      let workingTx = tx;
+      const needsLocalBalance = hasShieldedOrUnshieldedDeficit(tx);
+      if (needsLocalBalance) {
+        if (!wallet.facade) {
+          throw new Error(
+            'Sponsored buy/sell needs the full WalletFacade for NIGHT-balance. ' +
+            'Use initWallet() (not initWalletKeysOnly) for these actions.',
+          );
+        }
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          console.log('  hybrid: facade.balanceUnboundTransaction (shielded+unshielded only)…');
+        }
+        const recipe = await wallet.facade.balanceUnboundTransaction(
+          tx as never,
+          {
+            shieldedSecretKeys: wallet.keys.shielded.keys,
+            dustSecretKey: wallet.keys.dust.key,
+          },
+          {
+            tokenKindsToBalance: ['shielded', 'unshielded'],
+            ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000),
+          },
+        );
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          dumpTx('AFTER facade balance (baseTransaction)', recipe.baseTransaction);
+          if (recipe.balancingTransaction) dumpTx('AFTER facade balance (balancingTransaction)', recipe.balancingTransaction);
+        }
 
-      const provenBytes = (tx as { serialize(): Uint8Array }).serialize();
+        // The SDK's signRecipe is the canonical signer — it produces the
+        // correct binding hash (embedded-fr) that the chain + 1AM require.
+        // Hand-rolled signTransactionIntents writes via WASM Map.set which
+        // silently no-ops, leaving the tx with pedersen-schnorr binding
+        // that 1AM rejects with INVALID_TX deserialize.
+        const signFn = (payload: Uint8Array) => wallet.keystore.signData(payload);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const signed = await (wallet.facade as any).signRecipe(recipe, signFn);
+        const finalized = await wallet.facade.finalizeRecipe(signed);
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const f = finalized as any;
+          const methods = ['bind', 'serialize', 'mockProve', 'eraseProofs', 'eraseSignatures', 'wellFormed'];
+          const present = methods.filter(m => typeof f?.[m] === 'function').join(',');
+          const ctor = f?.constructor?.name ?? typeof f;
+          const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(f) ?? {}).slice(0, 30).join(',');
+          console.log(`  finalize result: ctor=${ctor} methods=[${present}] proto=[${proto}]`);
+          const firstBytes = Buffer.from(f.serialize()).slice(0, 80);
+          const headerAscii = firstBytes.toString('utf-8').replace(/[^\x20-\x7e]/g, '.');
+          console.log(`  serialized header: ${headerAscii}`);
+        }
+        // Try .bind() if it exists; otherwise use finalized as-is.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const f2 = finalized as any;
+        workingTx = typeof f2?.bind === 'function' ? f2.bind() : finalized;
+        if (process.env.LUMPFUN_DEBUG_TX === '1') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const w = workingTx as any;
+          const firstBytes = Buffer.from(w.serialize()).slice(0, 80);
+          const headerAscii = firstBytes.toString('utf-8').replace(/[^\x20-\x7e]/g, '.');
+          console.log(`  post-bind serialized header: ${headerAscii}`);
+          dumpTx('AFTER facade signRecipe+finalize+bind', workingTx);
+        }
+      }
+
+      const provenBytes = (workingTx as { serialize(): Uint8Array }).serialize();
       const headers: Record<string, string> = {
         'Content-Type': 'application/octet-stream',
         'X-Client-Name': 'lumpfun',

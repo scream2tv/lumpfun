@@ -271,14 +271,14 @@ launch
   .option('--referral <hex>')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (address: string, opts: any) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await buy(w, h, opts.tokens, opts.referral);
       console.log(`tx: ${r.txId}`);
       console.log(JSON.stringify({ quote: r.quote }, bi, 2));
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
@@ -289,14 +289,14 @@ launch
   .option('--referral <hex>')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (address: string, opts: any) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await sell(w, h, opts.tokens, opts.referral);
       console.log(`tx: ${r.txId}`);
       console.log(JSON.stringify({ quote: r.quote }, bi, 2));
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
@@ -307,13 +307,13 @@ launch
   .requiredOption('--amount <n>', 'amount', (v: string) => BigInt(v))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (address: string, opts: any) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await transfer(w, h, opts.to, opts.amount);
       console.log(`tx: ${r.txId}`);
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
@@ -321,13 +321,13 @@ launch
   .command('withdraw-platform <address>')
   .description('sweep platform-accrued NIGHT to the platform recipient')
   .action(async (address: string) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await withdrawPlatform(w, h);
       console.log(`tx: ${r.txId}`);
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
@@ -335,13 +335,13 @@ launch
   .command('withdraw-creator <address>')
   .description('sweep creator-accrued NIGHT to the creator')
   .action(async (address: string) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await withdrawCreator(w, h);
       console.log(`tx: ${r.txId}`);
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
@@ -351,13 +351,13 @@ launch
   .requiredOption('--ref <hex>', 'referrer hex Bytes<32>')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   .action(async (address: string, opts: any) => {
-    const w = initWalletKeysOnly();
+    const w = await initWallet(undefined, { waitForSync: false });
     try {
       const h = await connectLaunch(w, address);
       const r = await withdrawReferral(w, h, opts.ref);
       console.log(`tx: ${r.txId}`);
     } finally {
-      // keys-only wallet has no facade to stop
+      await stopWallet(w);
     }
   });
 
