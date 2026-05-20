@@ -63,6 +63,155 @@ wallet
   });
 
 wallet
+  .command('create-agents')
+  .description('generate N agent wallets under ~/.lumpfun/agents/agent-<i>/')
+  .requiredOption('--count <n>', 'number of agent wallets to create', (v) => parseInt(v, 10))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  .action(async (opts: any) => {
+    const { homedir } = await import('os');
+    const { join } = await import('path');
+    const { existsSync, mkdirSync } = await import('fs');
+    const baseDir = join(homedir(), '.lumpfun', 'agents');
+    if (!existsSync(baseDir)) mkdirSync(baseDir, { recursive: true, mode: 0o700 });
+
+    const results: Array<{ index: number; dir: string; addresses: { unshielded: string; shielded: string; dust: string } }> = [];
+    for (let i = 0; i < opts.count; i++) {
+      const dir = join(baseDir, `agent-${i}`);
+      if (existsSync(join(dir, 'seed.hex'))) {
+        console.log(`agent-${i}: seed already exists at ${join(dir, 'seed.hex')} — skipping`);
+        continue;
+      }
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const w = createWallet(dir);
+      results.push({ index: i, dir, addresses: w.addresses });
+    }
+    console.log('');
+    console.log(JSON.stringify(results, null, 2));
+    console.log('');
+    console.log(
+      `Created ${results.length} agent wallets. Fund them from the main wallet via:\n` +
+      `  npm run dev -- wallet send-night --agent <i> --amount <atoms>\n` +
+      `or programmatically via scripts/fund-agents.mjs.`,
+    );
+  });
+
+wallet
+  .command('fund-agents')
+  .description('send native tNIGHT to a range of agent wallets (one sync, N transfers)')
+  .option('--agents <range>', 'agent indices: "0-4" or "0,2,4" or "0" (default: all available)')
+  .requiredOption('--amount <atoms>', 'amount in NIGHT atoms per agent (e.g. 50000000 = 50 tNIGHT)')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  .action(async (opts: any) => {
+    const { homedir } = await import('os');
+    const { join } = await import('path');
+    const { existsSync, readdirSync } = await import('fs');
+    const ledger = await import('@midnight-ntwrk/ledger-v8');
+    const { balanceAndSubmitViaSponsor } = await import('./night.js');
+    const { loadSeed, deriveAllKeys, encodeAddresses } = await import('./wallet.js');
+    const { MidnightBech32m, UnshieldedAddress } = await import('@midnight-ntwrk/wallet-sdk-address-format');
+    const { getConfig } = await import('./config.js');
+    const cfg = getConfig();
+
+    const baseDir = join(homedir(), '.lumpfun', 'agents');
+    if (!existsSync(baseDir)) {
+      console.error(`No agents at ${baseDir}; run \`wallet create-agents --count N\` first.`);
+      process.exit(1);
+    }
+
+    // Resolve target agent indices.
+    let indices: number[];
+    if (!opts.agents) {
+      indices = readdirSync(baseDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && /^agent-(\d+)$/.test(e.name))
+        .map((e) => Number(e.name.split('-')[1]))
+        .sort((a, b) => a - b);
+    } else if (opts.agents.includes('-')) {
+      const [lo, hi] = opts.agents.split('-').map(Number);
+      indices = []; for (let i = lo; i <= hi; i++) indices.push(i);
+    } else {
+      indices = opts.agents.split(',').map((s: string) => Number(s.trim()));
+    }
+    if (indices.length === 0) { console.error('No agents resolved'); process.exit(1); }
+
+    // Resolve each agent's unshielded bech32 + decoded UnshieldedAddress.
+    const targets = indices.map((i) => {
+      const dir = join(baseDir, `agent-${i}`);
+      if (!existsSync(join(dir, 'seed.hex'))) {
+        throw new Error(`agent-${i}: no seed at ${dir}/seed.hex`);
+      }
+      const seed = loadSeed(dir);
+      const keys = deriveAllKeys(seed);
+      seed.fill(0);
+      const bech = encodeAddresses(keys, cfg.networkId).unshielded;
+      const decoded = MidnightBech32m.parse(bech).decode(UnshieldedAddress, cfg.networkId);
+      return { index: i, bech, decoded };
+    });
+
+    const amount = BigInt(opts.amount);
+    console.log(`Funding ${targets.length} agent(s) with ${amount} atoms each (${(Number(amount) / 1e6).toFixed(6)} tNIGHT).`);
+    console.log('Initializing main wallet — full sync required (~25-40 min cold start)...');
+    const w = await initWallet();
+    try {
+      for (const t of targets) {
+        console.log(`\n→ agent-${t.index} (${t.bech.slice(0, 24)}…)`);
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const recipe = await (w.facade as any).transferTransaction(
+            [{
+              type: 'unshielded',
+              outputs: [{ amount, receiverAddress: t.decoded, type: ledger.nativeToken().raw }],
+            }],
+            { shieldedSecretKeys: w.keys.shielded.keys, dustSecretKey: w.keys.dust.key },
+            { ttl: new Date(Date.now() + 30 * 60 * 1000), payFees: false },
+          );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const signed = await (w.facade as any).signRecipe(recipe, (payload: Uint8Array) => w.keystore.signData(payload));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const baseTx = (signed as any).baseTransaction;
+          if (!baseTx) throw new Error('signed.baseTransaction undefined');
+          const bytes = baseTx.serialize();
+          const result = await balanceAndSubmitViaSponsor(bytes, { debug: process.env.LUMPFUN_DEBUG_TX === '1' });
+          console.log(`  tx: ${result.txHash}`);
+        } catch (e) {
+          console.error(`  agent-${t.index} failed:`, e instanceof Error ? e.message : String(e));
+        }
+      }
+    } finally {
+      await stopWallet(w);
+    }
+  });
+
+wallet
+  .command('list-agents')
+  .description('list agent wallets under ~/.lumpfun/agents/')
+  .action(async () => {
+    const { homedir } = await import('os');
+    const { join } = await import('path');
+    const { readdirSync, existsSync } = await import('fs');
+    const { loadSeed, deriveAllKeys, encodeAddresses } = await import('./wallet.js');
+    const { getConfig } = await import('./config.js');
+    const baseDir = join(homedir(), '.lumpfun', 'agents');
+    if (!existsSync(baseDir)) {
+      console.log('No agents directory at', baseDir);
+      return;
+    }
+    const networkId = getConfig().networkId;
+    const entries = readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith('agent-'))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const agents = entries.map((e) => {
+      const dir = join(baseDir, e.name);
+      if (!existsSync(join(dir, 'seed.hex'))) return null;
+      const seed = loadSeed(dir);
+      const keys = deriveAllKeys(seed);
+      seed.fill(0);
+      const addresses = encodeAddresses(keys, networkId);
+      return { name: e.name, dir, addresses };
+    }).filter(Boolean);
+    console.log(JSON.stringify(agents, null, 2));
+  });
+
+wallet
   .command('status')
   .description('show the current wallet addresses')
   .action(async () => {

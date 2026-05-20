@@ -290,6 +290,73 @@ async function attachNightInputs(provenTx: unknown, wallet: InitializedWallet): 
  * (see node_modules/@midnight-ntwrk/wallet-sdk-node-client/dist/effect/
  * PolkadotNodeClient.js:78-94).
  */
+/**
+ * POST a signed-but-not-finalized Midnight tx to 1AM /balance (preprod
+ * sponsor wallet adds DUST input + fee signature), then submit the
+ * returned balanced tx hex to the chain via Polkadot.js over WSS.
+ *
+ * Use this from any flow that produces signed Midnight tx bytes — buy,
+ * sell, transfer, anything. The bytes must have the
+ * `signature[v1],proof,embedded-fr[v1]` header (i.e. `signed.baseTransaction`
+ * from `wallet.facade.signRecipe(recipe, signFn)`, NOT a finalized tx).
+ *
+ * Returns the on-chain tx hash (the one 1AM computed).
+ */
+export async function balanceAndSubmitViaSponsor(
+  signedTxBytes: Uint8Array,
+  options?: { remoteSubmitUrl?: string; remoteApiKey?: string; debug?: boolean },
+): Promise<{ txHash: string; contractAddresses?: Record<string, string> }> {
+  const remoteSubmitUrl = options?.remoteSubmitUrl
+    ?? process.env.MIDNIGHT_REMOTE_SUBMIT_URL
+    ?? 'https://api-preprod.1am.xyz';
+  const remoteApiKey = options?.remoteApiKey ?? process.env.ONEAM_API_KEY;
+  const debug = options?.debug ?? process.env.LUMPFUN_DEBUG_TX === '1';
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/octet-stream',
+    'X-Client-Name': 'lumpfun',
+  };
+  if (remoteApiKey) headers['X-API-Key'] = remoteApiKey;
+
+  const url = `${remoteSubmitUrl}/balance`;
+  const maxRetries = 5;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (debug) console.log(`  POST ${url} (attempt ${attempt}/${maxRetries}) — ${signedTxBytes.length} bytes`);
+    const resp = await fetch(url, { method: 'POST', headers, body: signedTxBytes as unknown as BodyInit });
+    const respText = await resp.text();
+    if (resp.ok) {
+      const result = JSON.parse(respText) as {
+        tx?: string; txBytes?: string; txHash?: string; hash?: string; txId?: string;
+        submitted?: boolean; contractAddresses?: Record<string, string>;
+      };
+      const txHash = result.txHash ?? result.hash;
+      const balancedHex = result.tx ?? result.txBytes;
+      if (!txHash || !balancedHex) throw new Error(`balancer response missing tx or txHash: ${respText.slice(0, 200)}`);
+      if (debug) console.log(`  balanced: txHash=${txHash}, hex=${balancedHex.length} chars`);
+
+      if (!result.submitted) {
+        const wssUrl = getConfig().rpcWssUrl;
+        if (debug) console.log(`  submitting via ${wssUrl} api.tx.midnight.sendMnTransaction...`);
+        const extrinsicHash = await submitMidnightTransaction(wssUrl, balancedHex);
+        if (debug) console.log(`  submit ok: extrinsic ${extrinsicHash}`);
+      }
+      return { txHash, contractAddresses: result.contractAddresses };
+    }
+
+    let retryMs = 60_000;
+    try {
+      const err = JSON.parse(respText) as { retryAfterMs?: number; error?: string; message?: string };
+      if (typeof err.retryAfterMs === 'number') retryMs = err.retryAfterMs;
+      if (debug) console.log(`  sponsor error (${resp.status}): ${err.error ?? ''} — ${err.message ?? respText.slice(0, 200)}`);
+    } catch {
+      if (debug) console.log(`  sponsor error (${resp.status}): ${respText.slice(0, 200)}`);
+    }
+    if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryMs));
+  }
+  throw new Error(`balanceAndSubmitViaSponsor: ${url} exhausted ${maxRetries} retries`);
+}
+
 async function submitMidnightTransaction(wssUrl: string, balancedHex: string): Promise<string> {
   const debug = process.env.LUMPFUN_DEBUG_TX === '1';
   const log = (s: string) => { if (debug) console.log(`  [submit] ${s}`); };
