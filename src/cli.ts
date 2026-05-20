@@ -236,6 +236,104 @@ wallet
   });
 
 wallet
+  .command('run-agents')
+  .description('continuously buy/sell against a launch contract from agent wallets')
+  .requiredOption('--contract <hex>', 'target launch contract address (32-byte hex)')
+  .option('--iterations <n>', 'stop after N actions (default: unlimited)', (v) => parseInt(v, 10))
+  .option('--min-interval <s>', 'min seconds between actions', (v) => parseInt(v, 10), 15)
+  .option('--max-interval <s>', 'max seconds between actions', (v) => parseInt(v, 10), 60)
+  .option('--min-tokens <n>', 'min tokens per action', '5')
+  .option('--max-tokens <n>', 'max tokens per action', '50')
+  .option('--force-buy-below <n>', 'if inventory < this, force buy', '5')
+  .option('--force-sell-above <n>', 'if inventory > this, force sell', '200')
+  .option('--min-night-balance <atoms>', 'skip agent if unshielded balance < this', '1000000')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  .action(async (opts: any) => {
+    const { homedir } = await import('os');
+    const { join } = await import('path');
+    const { existsSync, readdirSync } = await import('fs');
+    const ledger = await import('@midnight-ntwrk/ledger-v8');
+    const { waitForUnshieldedBalance } = await import('./wallet.js');
+
+    const baseDir = join(homedir(), '.lumpfun', 'agents');
+    if (!existsSync(baseDir)) {
+      console.error(`No agents at ${baseDir}; run \`wallet create-agents --count N\` first.`);
+      process.exit(1);
+    }
+    const agentDirs = readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^agent-(\d+)$/.test(e.name))
+      .map((e) => ({ index: Number(e.name.split('-')[1]), dir: join(baseDir, e.name) }))
+      .filter((a) => existsSync(join(a.dir, 'seed.hex')))
+      .sort((a, b) => a.index - b.index);
+    if (agentDirs.length === 0) { console.error('No funded agents found'); process.exit(1); }
+
+    console.log(`Running ${agentDirs.length} agents against ${opts.contract}.`);
+    console.log(`Token range ${opts.minTokens}–${opts.maxTokens}, interval ${opts.minInterval}–${opts.maxInterval}s.`);
+
+    const minTokens = BigInt(opts.minTokens);
+    const maxTokens = BigInt(opts.maxTokens);
+    const forceBuyBelow = BigInt(opts.forceBuyBelow);
+    const forceSellAbove = BigInt(opts.forceSellAbove);
+    const minNightBalance = BigInt(opts.minNightBalance);
+
+    const inventory = new Map<number, bigint>();
+    for (const a of agentDirs) inventory.set(a.index, 0n);
+
+    const nativeToken = ledger.nativeToken().raw;
+    const rand = (lo: number, hi: number) => Math.floor(Math.random() * (hi - lo + 1)) + lo;
+    const randBig = (lo: bigint, hi: bigint) => lo + BigInt(Math.floor(Math.random() * Number(hi - lo + 1n)));
+
+    let actionCount = 0;
+    const maxActions = opts.iterations ?? Infinity;
+    while (actionCount < maxActions) {
+      const agent = agentDirs[Math.floor(Math.random() * agentDirs.length)];
+      const inv = inventory.get(agent.index) ?? 0n;
+
+      let side: 'buy' | 'sell';
+      if (inv < forceBuyBelow) side = 'buy';
+      else if (inv > forceSellAbove) side = 'sell';
+      else side = Math.random() < 0.5 ? 'buy' : 'sell';
+
+      const tokens = randBig(minTokens, maxTokens);
+      const effectiveTokens = side === 'sell' ? (tokens > inv ? inv : tokens) : tokens;
+      if (side === 'sell' && effectiveTokens === 0n) {
+        side = 'buy';  // can't sell from empty
+      }
+
+      console.log(`\n[#${actionCount + 1}] agent-${agent.index} → ${side} ${effectiveTokens} (inv=${inv})`);
+
+      try {
+        const w = await initWallet(agent.dir, { waitForSync: false });
+        try {
+          await waitForUnshieldedBalance(w, nativeToken, minNightBalance, 15 * 60 * 1000);
+          const handle = await connectLaunch(w, opts.contract);
+          if (side === 'buy') {
+            const r = await buy(w, handle, effectiveTokens);
+            inventory.set(agent.index, inv + effectiveTokens);
+            console.log(`  ✓ buy tx ${r.txId} (new inv: ${inv + effectiveTokens})`);
+          } else {
+            const r = await sell(w, handle, effectiveTokens);
+            inventory.set(agent.index, inv - effectiveTokens);
+            console.log(`  ✓ sell tx ${r.txId} (new inv: ${inv - effectiveTokens})`);
+          }
+          actionCount++;
+        } finally {
+          await stopWallet(w);
+        }
+      } catch (e) {
+        console.error(`  ✗ ${side} failed:`, e instanceof Error ? e.message : String(e));
+      }
+
+      if (actionCount < maxActions) {
+        const sleepMs = rand(opts.minInterval, opts.maxInterval) * 1000;
+        console.log(`  sleep ${(sleepMs / 1000).toFixed(0)}s…`);
+        await new Promise((r) => setTimeout(r, sleepMs));
+      }
+    }
+    console.log(`\nDone after ${actionCount} actions.`);
+  });
+
+wallet
   .command('list-agents')
   .description('list agent wallets under ~/.lumpfun/agents/')
   .action(async () => {
